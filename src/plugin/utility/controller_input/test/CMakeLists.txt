@@ -1,0 +1,5 @@
+include(CTest)
+create_tests("xstudio::plugin_manager")
+target_sources(input_test PRIVATE ../src/input.cpp ../src/controller_plugin.cpp)
+target_include_directories(input_test PRIVATE ../src)
+target_link_libraries(input_test PRIVATE Xinput)

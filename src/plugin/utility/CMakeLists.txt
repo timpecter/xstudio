@@ -1,3 +1,6 @@
 add_src_and_test(session_snapshots)
 add_src_and_test(filesystem_browser)
+if(WIN32)
+	add_src_and_test(controller_input)
+endif()
 build_studio_plugins("${STUDIO_PLUGINS}")

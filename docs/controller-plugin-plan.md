@@ -6,6 +6,19 @@ Status: planning baseline for agent interrogation; not an implementation specifi
 
 Implementation and hardware validation: not performed in this planning task
 
+Implementation update (2026-10-25): after confirming the native checkpoint
+`98764fa3` works, the user requested a Python-only controller plugin. The current
+implementation is in [controller_input](../src/plugin/python_plugins/controller_input),
+with standard-library `ctypes` XInput acquisition, a shared Python action owner,
+and QML presentation through the existing Python plugin API. No
+controller-specific native shim or third-party input package is required.
+This supersedes the native-plugin proposal below. See the
+[checklist](controller-todo.md) for verification and remaining acceptance work.
+The compact mode badge is now Menu-held only; the View guide is independent.
+Playlists/Media provide read-only shared browsing previews. Confirmation/source
+activation is still pending, so browsing must not be treated as a completed
+browse-and-confirm workflow.
+
 ## 1. Purpose and authority
 
 Enable a supervisor to operate an xSTUDIO screening from a controller and
@@ -134,7 +147,7 @@ before selecting a package.
 
 | Option | External documentation | Proposed consequence for xSTUDIO |
 |---|---|---|
-| XInput 1.4 | Windows SDK API and inbox Windows runtime; state polling, up to four indexed controller slots, disconnected-device result. Windows-only. | Link the SDK import library in the Windows adapter. No new third-party controller DLL to bundle. Implement button edges, disconnect detection, reconnect baseline, and polling cadence. Slots are not persistent personal identities. |
+| XInput 1.4 | Windows SDK API and inbox Windows runtime; state polling, up to four indexed controller slots, disconnected-device result. Windows-only. | Call the inbox DLL with Python `ctypes`. No new third-party controller DLL to bundle. Implement button edges, disconnect detection, reconnect baseline, and polling cadence. Slots are not persistent personal identities. |
 | GameInput | Windows input API with polling/callbacks and device notification/focus facilities; package/runtime deployment requirements. | Add explicit SDK/package integration and verify current runtime redistribution requirements for both installer and portable use. Do not assume vcpkg app-local copying provisions its runtime. No macOS/Linux solution. |
 | SDL3 | Gamepad mappings, lifecycle/input events, and Windows/macOS/Linux support. Input update/event pumping has threading and subsystem requirements. | Add a version-controlled dependency through the existing vcpkg setup; verify availability at the pinned baseline or select an explicit supported version. Link SDL3 and test Qt coexistence. With dynamic linkage, stage the runtime and notices for both Windows packages; audit macOS bundle and Linux runtime packaging later. |
 
@@ -153,7 +166,7 @@ hardware/protocol investigation. SDL3 is not a MIDI or OSC backend.
 
 ## 5. Proposed architecture and event boundary
 
-Use one resident native plugin with QML presentation/configuration. Keep four
+Use one application-owned Python plugin with QML presentation/configuration. Keep four
 responsibilities separate without introducing services or a general event bus:
 
 1. **Input adapter:** acquire native input and connection status.

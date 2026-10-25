@@ -35,6 +35,8 @@ class ControllerPlugin : public plugin::StandardPlugin {
 
   private:
     void execute(const Command &command);
+    void refresh_overlay();
+    void toggle_guide();
     void toggle_playback();
     void cycle_loop();
     void toggle_mask();
@@ -49,6 +51,10 @@ class ControllerPlugin : public plugin::StandardPlugin {
     Bindings bindings_;
     Observe observe_;
     Observe observe_command_;
+    module::BooleanAttribute *guide_enabled_{nullptr};
+    module::BooleanAttribute *connected_{nullptr};
+    module::StringAttribute *mode_{nullptr};
+    module::StringAttribute *status_{nullptr};
     float pending_exposure_{0.0f};
     bool exposure_busy_{false};
     std::unique_ptr<Poller> poller_;

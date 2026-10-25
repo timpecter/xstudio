@@ -15,8 +15,6 @@ const char *xstudio::controller_input::mode_name(Mode mode) {
         return "playlists";
     case Mode::Media:
         return "media";
-    case Mode::Grading:
-        return "grading";
     }
     throw std::logic_error("Unknown controller mode");
 }
@@ -54,23 +52,23 @@ std::optional<Command> Bindings::accept(const Event &event) {
     case Edge::Connected:
     case Edge::Disconnected:
         // Buttons held at connect are a baseline, so the modifier starts released.
-        view_held_ = false;
+        menu_held_ = false;
         return {};
     case Edge::Up:
-        if (event.button == button::View)
-            view_held_ = false;
+        if (event.button == button::Menu)
+            menu_held_ = false;
         return {};
     case Edge::Down:
         break;
     }
 
-    if (event.button == button::View) {
-        view_held_ = true;
+    if (event.button == button::Menu) {
+        menu_held_ = true;
         return {};
     }
 
-    if (view_held_) {
-        constexpr int mode_count = static_cast<int>(Mode::Grading) + 1;
+    if (menu_held_) {
+        constexpr int mode_count = static_cast<int>(Mode::Timeline) + 1;
         int step                 = 0;
         if (event.button == button::DpadDown)
             step = 1;
@@ -91,7 +89,7 @@ std::optional<Action> Bindings::resolve(uint16_t pressed) {
     switch (pressed) {
     case button::X:
         return Action::TogglePlayback;
-    case button::Menu:
+    case button::View:
         return Action::ToggleGuide;
     default:
         break;
@@ -109,7 +107,6 @@ std::optional<Action> Bindings::resolve(uint16_t pressed) {
             return Action::ToggleMask;
         break;
     case Mode::Timeline:
-    case Mode::Grading:
         break;
     case Mode::Playlists:
     case Mode::Media:

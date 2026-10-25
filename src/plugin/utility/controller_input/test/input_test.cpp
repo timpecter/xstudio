@@ -239,11 +239,11 @@ TEST(ControllerInput, BindingsResolveApprovedLayout) {
     EXPECT_EQ(bindings.accept(down(button::DpadUp, 4))->action, Action::ExposureUp);
     EXPECT_EQ(bindings.accept(down(button::DpadDown, 5))->action, Action::ExposureDown);
     EXPECT_EQ(bindings.accept(down(button::Y, 6))->action, Action::CycleLoop);
-    EXPECT_EQ(bindings.accept(down(button::Menu, 7))->action, Action::ToggleGuide);
+    EXPECT_EQ(bindings.accept(down(button::View, 7))->action, Action::ToggleGuide);
     EXPECT_EQ(bindings.accept(down(button::A, 8))->action, Action::ToggleMask);
 
-    // View is a dedicated modifier: no action alone, and it suppresses other buttons.
-    EXPECT_FALSE(bindings.accept(down(button::View, 9)));
+    // Menu is a dedicated modifier: no action alone, and it suppresses other buttons.
+    EXPECT_FALSE(bindings.accept(down(button::Menu, 9)));
     EXPECT_FALSE(bindings.accept(down(button::X, 10)));
     uint64_t sequence = 11;
     EXPECT_FALSE(bindings.accept(down(button::DpadLeft, sequence++)));
@@ -255,11 +255,10 @@ TEST(ControllerInput, BindingsResolveApprovedLayout) {
         {button::DpadDown, Mode::Playlists},
         {button::DpadDown, Mode::Media},
         {button::DpadDown, Mode::Timeline},
-        {button::DpadDown, Mode::Grading},
         {button::DpadDown, Mode::Viewer},
-        {button::DpadUp, Mode::Grading},
         {button::DpadUp, Mode::Timeline},
-        {button::DpadDown, Mode::Grading},
+        {button::DpadUp, Mode::Media},
+        {button::DpadDown, Mode::Timeline},
         {button::DpadDown, Mode::Viewer}};
     for (const auto &[pressed, mode] : modes) {
         auto selected = bindings.accept(down(pressed, sequence++));
@@ -268,29 +267,27 @@ TEST(ControllerInput, BindingsResolveApprovedLayout) {
         EXPECT_EQ(selected->mode, mode);
         EXPECT_EQ(bindings.mode(), mode);
     }
-    EXPECT_FALSE(bindings.accept(up(button::View, sequence++)));
+    EXPECT_FALSE(bindings.accept(up(button::Menu, sequence++)));
     EXPECT_EQ(bindings.accept(down(button::DpadUp, sequence++))->action, Action::ExposureUp);
 
     const auto select = [&](Mode mode) {
-        EXPECT_FALSE(bindings.accept(down(button::View, sequence++)));
+        EXPECT_FALSE(bindings.accept(down(button::Menu, sequence++)));
         while (bindings.mode() != mode)
             bindings.accept(down(button::DpadDown, sequence++));
-        EXPECT_FALSE(bindings.accept(up(button::View, sequence++)));
+        EXPECT_FALSE(bindings.accept(up(button::Menu, sequence++)));
     };
 
-    for (const auto mode : {Mode::Timeline, Mode::Grading}) {
-        select(mode);
-        for (const auto pressed :
-             {button::Y,
-              button::A,
-              button::B,
-              button::DpadUp,
-              button::DpadDown,
-              button::DpadLeft,
-              button::DpadRight})
-            EXPECT_FALSE(bindings.accept(down(pressed, sequence++)));
-        EXPECT_EQ(bindings.accept(down(button::X, sequence++))->action, Action::TogglePlayback);
-    }
+    select(Mode::Timeline);
+    for (const auto pressed :
+         {button::Y,
+          button::A,
+          button::B,
+          button::DpadUp,
+          button::DpadDown,
+          button::DpadLeft,
+          button::DpadRight})
+        EXPECT_FALSE(bindings.accept(down(pressed, sequence++)));
+    EXPECT_EQ(bindings.accept(down(button::X, sequence++))->action, Action::TogglePlayback);
 
     for (const auto mode : {Mode::Playlists, Mode::Media}) {
         select(mode);
@@ -313,11 +310,11 @@ TEST(ControllerInput, LoopModeCyclesThroughAllModes) {
 TEST(ControllerInput, BindingsClearModifierOnConnectionChange) {
     Bindings bindings;
     bindings.accept({1, 1, Edge::Connected, 0, 0});
-    EXPECT_FALSE(bindings.accept(down(button::View, 2)));
+    EXPECT_FALSE(bindings.accept(down(button::Menu, 2)));
     EXPECT_FALSE(bindings.accept({1, 3, Edge::Disconnected, 0, 0}));
 
-    // View held through reconnect is baseline, so D-pad keeps its mode action.
-    EXPECT_FALSE(bindings.accept({2, 4, Edge::Connected, 0, button::View}));
+    // Menu held through reconnect is baseline, so D-pad keeps its mode action.
+    EXPECT_FALSE(bindings.accept({2, 4, Edge::Connected, 0, button::Menu}));
     auto exposure = bindings.accept(down(button::DpadUp, 5, 2));
     ASSERT_TRUE(exposure);
     EXPECT_EQ(exposure->action, Action::ExposureUp);
@@ -376,6 +373,120 @@ caf::actor fake_viewport(caf::actor_system &system, caf::actor pipeline) {
     });
 }
 } // namespace
+
+TEST(ControllerInput, OverlayRegistersWithUiAndShowsModeWithoutGuide) {
+    ACTOR_INIT_GLOBAL_META()
+    fixture f;
+    struct UiState {
+        std::mutex mutex;
+        std::condition_variable wake;
+        std::map<std::string, utility::JsonStore> attributes;
+        std::map<utility::Uuid, std::string> titles;
+        int redraws{0};
+    };
+    auto ui = std::make_shared<UiState>();
+    auto models = f.system.spawn([ui](caf::event_based_actor *) -> caf::behavior {
+        return {
+            [ui](
+                ui::model_data::register_model_data_atom,
+                const std::string &group,
+                const utility::JsonStore &data,
+                const utility::Uuid &uuid,
+                const std::string &,
+                caf::actor) {
+                std::lock_guard lock(ui->mutex);
+                const auto title = data.at("title").get<std::string>();
+                ui->titles[uuid] = title;
+                ui->attributes[group + "/" + title] = data;
+                ui->wake.notify_all();
+            },
+            [ui](
+                ui::model_data::set_node_data_atom,
+                const std::string &group,
+                const utility::Uuid &uuid,
+                const std::string &role,
+                const utility::JsonStore &value,
+                caf::actor) {
+                std::lock_guard lock(ui->mutex);
+                const auto title = ui->titles.find(uuid);
+                if (title != ui->titles.end())
+                    ui->attributes[group + "/" + title->second][role] = value;
+                ui->wake.notify_all();
+            }};
+    });
+    auto keyboard_group = f.system.spawn<broadcast::BroadcastActor>();
+    auto keyboard = f.system.spawn(
+        [keyboard_group](caf::event_based_actor *) -> caf::behavior {
+            return {[keyboard_group](utility::get_event_group_atom) {
+                return keyboard_group;
+            }};
+        });
+    auto events = f.system.spawn([ui](caf::event_based_actor *) -> caf::behavior {
+        return {[ui](playhead::redraw_viewport_atom) {
+            std::lock_guard lock(ui->mutex);
+            ++ui->redraws;
+            ui->wake.notify_all();
+        }};
+    });
+    f.system.registry().put(global_ui_model_data_registry, models);
+    f.system.registry().put(keyboard_events, keyboard);
+    f.system.registry().put(global_playhead_events_actor, events);
+
+    auto actor = f.system.spawn<ControllerPlugin>(
+        utility::JsonStore(), []() { return State{}; });
+    uint64_t sequence = 0;
+    const auto sample = [&](bool connected, uint16_t buttons) {
+        utility::JsonStore json;
+        json["generation"] = 1;
+        json["sequence"]   = ++sequence;
+        json["connected"]  = connected;
+        json["buttons"]    = buttons;
+        f.self->mail(utility::event_atom_v, std::string("controller_sample"), json).send(actor);
+    };
+    const auto wait_for_state = [&](
+                                    const std::string &mode,
+                                    bool guide,
+                                    bool connected,
+                                    int redraws) {
+        std::unique_lock lock(ui->mutex);
+        return ui->wake.wait_for(lock, 1s, [&]() {
+            const auto value_is = [&](const std::string &title, const nlohmann::json &value) {
+                const auto found = ui->attributes.find("controller_input_state/" + title);
+                return found != ui->attributes.end() && found->second.at("value") == value;
+            };
+            return value_is("Controller Mode", mode) &&
+                   value_is("Controller Guide", guide) &&
+                   value_is("Controller Connected", connected) && ui->redraws >= redraws;
+        });
+    };
+
+    EXPECT_TRUE(wait_for_state("viewer", false, false, 0));
+    sample(true, 0);
+    EXPECT_TRUE(wait_for_state("viewer", false, true, 1));
+    sample(true, button::Menu);
+    sample(true, button::Menu | button::DpadDown);
+    sample(true, 0);
+    EXPECT_TRUE(wait_for_state("playlists", false, true, 2));
+    sample(true, button::View);
+    sample(true, 0);
+    EXPECT_TRUE(wait_for_state("playlists", true, true, 3));
+    sample(true, button::View);
+    sample(true, 0);
+    EXPECT_TRUE(wait_for_state("playlists", false, true, 4));
+    sample(false, 0);
+    EXPECT_TRUE(wait_for_state("playlists", false, false, 5));
+
+    f.self->send_exit(actor, caf::exit_reason::user_shutdown);
+    f.self->wait_for(actor);
+    f.system.registry().erase(global_ui_model_data_registry);
+    f.system.registry().erase(keyboard_events);
+    f.system.registry().erase(global_playhead_events_actor);
+    std::lock_guard lock(ui->mutex);
+    const auto overlay = ui->attributes.find("viewport_overlay_plugins/Controller Input Overlay");
+    ASSERT_NE(overlay, ui->attributes.end());
+    EXPECT_EQ(overlay->second.at("value"), true);
+    EXPECT_TRUE(overlay->second.contains("qml_code"));
+}
 
 TEST(ControllerInput, CommandsDriveStudioActionsOncePerPress) {
     ACTOR_INIT_GLOBAL_META()
@@ -459,16 +570,18 @@ TEST(ControllerInput, CommandsDriveStudioActionsOncePerPress) {
         0,
         button::A,
         0,
-        button::Y,
-        0,
-        button::View,
-        button::View | button::DpadDown,
         button::View,
         0,
         button::Y,
         0,
-        button::View,
-        button::View | button::DpadUp,
+        button::Menu,
+        button::Menu | button::DpadDown,
+        button::Menu,
+        0,
+        button::Y,
+        0,
+        button::Menu,
+        button::Menu | button::DpadUp,
         0};
     std::atomic<size_t> index{0};
     auto actor = f.system.spawn<ControllerPlugin>(
@@ -486,16 +599,26 @@ TEST(ControllerInput, CommandsDriveStudioActionsOncePerPress) {
     {
         std::unique_lock lock(studio->mutex);
         done = studio->wake.wait_for(lock, 3s, [&]() {
-            return studio->commands.size() >= 7 && studio->playing &&
+            return studio->commands.size() >= 8 && studio->playing &&
                    studio->loop == playhead::LM_PLAY_ONCE && studio->mask_events.size() >= 2 &&
                    studio->exposure_writes[0] >= 2 && studio->exposure_writes[1] >= 2;
         });
     }
+    utility::JsonStore guide_value;
+    f.self->request(
+                 actor,
+                 1s,
+                 module::attribute_value_atom_v,
+                 std::string("Controller Guide"))
+        .receive(
+            [&](const utility::JsonStore &value) { guide_value = value; },
+            [&](caf::error &error) { ADD_FAILURE() << to_string(error); });
     f.self->send_exit(actor, caf::exit_reason::user_shutdown);
     f.self->wait_for(actor);
     f.system.registry().erase(global_playhead_events_actor);
     f.system.registry().erase(keyboard_events);
     EXPECT_TRUE(done);
+    EXPECT_TRUE(guide_value.get<bool>());
 
     std::lock_guard lock(studio->mutex);
     const std::vector<std::pair<std::string, std::string>> expected{
@@ -503,6 +626,7 @@ TEST(ControllerInput, CommandsDriveStudioActionsOncePerPress) {
         {"exposure_up", "viewer"},
         {"exposure_up", "viewer"},
         {"toggle_mask", "viewer"},
+        {"toggle_guide", "viewer"},
         {"cycle_loop", "viewer"},
         {"select_mode", "playlists"},
         // Y has no Playlists binding, so the next command is the return to Viewer.

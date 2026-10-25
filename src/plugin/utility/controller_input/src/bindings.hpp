@@ -22,7 +22,7 @@ namespace button {
     constexpr uint16_t Y         = 0x8000;
 } // namespace button
 
-enum class Mode { Viewer, Playlists, Media, Timeline, Grading };
+enum class Mode { Viewer, Playlists, Media, Timeline };
 
 enum class Action {
     SelectMode,
@@ -48,8 +48,8 @@ struct Command {
 const char *mode_name(Mode mode);
 const char *action_name(Action action);
 
-// Fixed Stage 1 layout. View is a dedicated modifier: while held, only
-// View + D-pad Down/Up (next/previous mode, wrapping) is active. Commands
+// Fixed Stage 1 layout. Menu is a dedicated modifier: while held, only
+// Menu + D-pad Down/Up (next/previous mode, wrapping) is active. Commands
 // dispatch on button down.
 class Bindings {
   public:
@@ -60,7 +60,7 @@ class Bindings {
     std::optional<Action> resolve(uint16_t button);
 
     Mode mode_{Mode::Viewer};
-    bool view_held_{false};
+    bool menu_held_{false};
 };
 
 } // namespace xstudio::controller_input

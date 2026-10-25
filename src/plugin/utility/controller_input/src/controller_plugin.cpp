@@ -71,7 +71,83 @@ ControllerPlugin::ControllerPlugin(
     : StandardPlugin(cfg, "Controller Input", settings),
       observe_(std::move(observe)),
       observe_command_(std::move(observe_command)) {
+    status_ = add_string_attribute("Controller Status", "Status", "Controller disconnected");
+    status_->expose_in_ui_attrs_group("controller_input_state");
+
+    guide_enabled_ = add_boolean_attribute("Controller Guide", "Guide", false);
+    guide_enabled_->expose_in_ui_attrs_group("controller_input_state");
+    connected_ = add_boolean_attribute("Controller Connected", "Connected", false);
+    connected_->expose_in_ui_attrs_group("controller_input_state");
+    mode_ = add_string_attribute("Controller Mode", "Mode", mode_name(bindings_.mode()));
+    mode_->expose_in_ui_attrs_group("controller_input_state");
+    qml_viewport_overlay_code(
+        R"(
+            import QtQuick
+            import xStudio 1.0
+            import xstudio.qml.models 1.0
+            import xstudio.qml.helpers 1.0
+
+            Item {
+                anchors.fill: parent
+                visible: !view.isQuickview &&
+                         (connectedValue.value === true || guideValue.value === true)
+                XsModuleData {
+                    id: controllerState
+                    modelDataName: "controller_input_state"
+                }
+                XsAttributeValue {
+                    id: connectedValue
+                    attributeTitle: "Controller Connected"
+                    model: controllerState
+                }
+                XsAttributeValue {
+                    id: modeValue
+                    attributeTitle: "Controller Mode"
+                    model: controllerState
+                }
+                XsAttributeValue {
+                    id: guideValue
+                    attributeTitle: "Controller Guide"
+                    model: controllerState
+                }
+                XsAttributeValue {
+                    id: statusValue
+                    attributeTitle: "Controller Status"
+                    model: controllerState
+                }
+                Rectangle {
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    anchors.margins: 24
+                    width: 360
+                    height: guideText.implicitHeight + 32
+                    radius: 8
+                    color: "#dd17191d"
+                    border.color: "#8899aabb"
+
+                    Text {
+                        id: guideText
+                        anchors.fill: parent
+                        anchors.margins: 16
+                        color: "white"
+                        font.pixelSize: 18
+                        text: "Controller mode: " +
+                              (modeValue.value === undefined ? "" : modeValue.value) +
+                              (guideValue.value === true ?
+                                  "\n\n" + statusValue.value +
+                                  "\n\nMenu + D-pad: change mode" +
+                                  "\nX: play / pause; View: guide" +
+                                  "\nViewer: D-pad exposure, A mask, Y loop" +
+                                  "\nPlaylists / Media: navigation not available yet" : "")
+                        wrapMode: Text.WordWrap
+                    }
+                }
+            }
+        )");
+
     const auto actor = caf::actor_cast<caf::actor>(this);
+    // Register attributes after StandardPlugin::make_behavior sets the module's actor.
+    mail(module::connect_to_ui_atom_v).send(actor);
     poller_          = std::make_unique<Poller>(
         std::move(read),
         [actor](const Sample &sample) {
@@ -108,6 +184,15 @@ caf::message_handler ControllerPlugin::message_handler_extensions() {
                 return;
             }
             for (const auto &event : *events) {
+                if (event.edge == Edge::Connected) {
+                    connected_->set_value(true);
+                    status_->set_value("Controller connected");
+                    refresh_overlay();
+                } else if (event.edge == Edge::Disconnected) {
+                    connected_->set_value(false);
+                    status_->set_value("Controller disconnected");
+                    refresh_overlay();
+                }
                 utility::JsonStore normalized;
                 normalized["backend"]    = "xinput1_4";
                 normalized["slot"]       = 0;
@@ -151,6 +236,12 @@ void ControllerPlugin::execute(const Command &command) {
 
     switch (command.action) {
     case Action::SelectMode:
+        mode_->set_value(mode_name(command.mode));
+        status_->set_value(std::string("Mode: ") + mode_name(command.mode));
+        refresh_overlay();
+        break;
+    case Action::ToggleGuide:
+        toggle_guide();
         break;
     case Action::TogglePlayback:
         toggle_playback();
@@ -167,7 +258,6 @@ void ControllerPlugin::execute(const Command &command) {
     case Action::CycleLoop:
         cycle_loop();
         break;
-    case Action::ToggleGuide:
     case Action::BrowsePrevious:
     case Action::BrowseNext:
     case Action::Confirm:
@@ -183,6 +273,18 @@ caf::actor ControllerPlugin::registry_actor(const std::string &name, const char 
     if (!actor)
         spdlog::warn("Controller Command: {} failed: {} is unavailable", action, name);
     return actor;
+}
+
+void ControllerPlugin::toggle_guide() {
+    const bool enabled = !guide_enabled_->value();
+    guide_enabled_->set_value(enabled);
+    status_->set_value(enabled ? "Controller guide shown" : "Controller guide hidden");
+    refresh_overlay();
+}
+
+void ControllerPlugin::refresh_overlay() {
+    if (auto events = registry_actor(global_playhead_events_actor, "refresh_overlay"))
+        anon_mail(playhead::redraw_viewport_atom_v).send(events);
 }
 
 void ControllerPlugin::toggle_playback() {

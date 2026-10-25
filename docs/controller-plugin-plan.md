@@ -15,9 +15,13 @@ controller-specific native shim or third-party input package is required.
 This supersedes the native-plugin proposal below. See the
 [checklist](controller-todo.md) for verification and remaining acceptance work.
 The compact mode badge is now Menu-held only; the View guide is independent.
-Playlists/Media provide read-only shared browsing previews. Confirmation/source
-activation is still pending, so browsing must not be treated as a completed
-browse-and-confirm workflow.
+Menu + D-pad Left/Right changes mode. Viewer D-pad Left/Right adjusts
+exposure and Up/Down steps the displayed media. Playlists/Media browse only
+while Menu is held (Menu + Up/Down, Menu + A). A activates the highlighted playlist or
+nested container: it updates the viewer and Media panel and pins timelines. In
+Media, A replaces the selection and RB+A toggles the highlighted item in it.
+Play/pause state is preserved. User acceptance and the projector trial are
+pending.
 
 ## 1. Purpose and authority
 

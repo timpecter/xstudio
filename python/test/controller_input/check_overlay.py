@@ -45,13 +45,22 @@ Item {
             attributeTitle === "Controller Browse Visible" ? state.browsing :
             attributeTitle === "Controller Browse Rows" ? state.rows :
             attributeTitle === "Controller Browse Index" ? 1 :
-            attributeTitle === "Controller Browse Title" ? "Playlists preview" :
+            attributeTitle === "Controller Browse Title" ? "Playlists" :
+            attributeTitle === "Controller Browse Marked" ? [false, true] :
             attributeTitle === "Controller Guide" ? state.guide : state.status
     }
     PRODUCTION_OVERLAY
     TestCase {
         name: "ControllerOverlay"
         when: windowShown
+        function texts(item, found) {
+            for (var i = 0; i < item.children.length; ++i) {
+                var child = item.children[i]
+                if (child.text !== undefined && child.visible) found.push(child.text)
+                texts(child, found)
+            }
+            return found
+        }
         function test_badge_guide_and_visibility() {
             compare(overlay.visible, false)
             state.connected = true
@@ -79,12 +88,17 @@ Item {
             tryCompare(overlay, "visible", true)
             state.guide = false
             state.browsing = true
+            tryCompare(overlay, "visible", false)
+            state.menu = true
             tryCompare(overlay, "visible", true)
-            compare(guideText.visible, false)
             tryVerify(function() { return badge.height > 100 }, 1000, "browse expansion")
             verify(badge.y >= 0, "browse top")
-            state.browsing = false
+            var rows = texts(content, [])
+            verify(rows.indexOf("\u25CF  " + state.rows[1]) !== -1, "selected row marker: " + rows)
+            verify(rows.indexOf("     " + state.rows[0]) !== -1, "unselected row: " + rows)
+            state.menu = false
             tryCompare(overlay, "visible", false)
+            state.browsing = false
             view.isQuickview = true
             tryCompare(overlay, "visible", false)
             state.guide = true

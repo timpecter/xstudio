@@ -49,7 +49,9 @@ class RuntimeProbe:
                 return
 
             from controller_input.bindings import Bindings, Command
-            from controller_input.input import A, X, Y, MENU, VIEW, DPAD_DOWN, Edges, Sample, State
+            from controller_input.input import (
+                A, RB, X, Y, MENU, VIEW, DPAD_DOWN, DPAD_RIGHT, DPAD_UP, Edges, Sample, State)
+            from xstudio.core import key_playhead_index_atom
             from xstudio.core import LoopMode, viewport_atom, colour_pipeline_atom, attribute_value_atom
 
             assert all(thread.is_alive() for thread in plugin._threads)
@@ -74,6 +76,11 @@ class RuntimeProbe:
                 sample(button)
                 sample()
 
+            def with_menu(buttons):
+                sample(MENU)
+                sample(MENU | buttons)
+                sample(MENU)
+
             overlay = plugin.get_attribute("Controller Input Overlay")
             assert overlay.value() is True, overlay.as_json()
             assert overlay.role_data("type") == "OnOffToggle", overlay.as_json()
@@ -87,8 +94,10 @@ class RuntimeProbe:
             assert plugin.menu_held.value() is False
             sample(MENU)
             assert plugin.menu_held.value() is True
-            sample(MENU | DPAD_DOWN)
+            sample(MENU | DPAD_RIGHT)
+            assert plugin.browse_visible.value() is True
             sample()
+            assert plugin.browse_visible.value() is False
             assert plugin.menu_held.value() is False
             assert plugin.mode.value() == "playlists"
             assert plugin.guide.value() is False
@@ -160,27 +169,94 @@ class RuntimeProbe:
             playlist.playhead_selection.set_selection([media.uuid])
             viewed_id = str(session.viewed_container.uuid)
             selected_ids = [str(item.uuid) for item in playlist.playhead_selection.selected_sources]
-            plugin.bindings.mode = "playlists"
-            plugin.execute(Command("select_mode", "playlists", 1, sequence))
+            plugin.bindings.mode = "viewer"
+            with_menu(DPAD_RIGHT)
+            sample()
+            assert plugin.mode.value() == "playlists"
             rows = plugin.browse_rows.value()
             assert "Controller probe / Preview timeline" in rows, rows
             assert "Other playlist" in rows, rows
             press(DPAD_DOWN)
-            assert "Preview timeline" in plugin.browse_rows.value()[plugin.browse_index.value()]
-            plugin.bindings.mode = "media"
-            plugin.execute(Command("select_mode", "media", 1, sequence))
-            assert len(plugin.browse_rows.value()) == 2
-            press(DPAD_DOWN)
-            assert plugin.browse_index.value() == 1
-            assert str(session.viewed_container.uuid) == viewed_id
-            assert [str(item.uuid) for item in playlist.playhead_selection.selected_sources] == selected_ids
-            assert playhead.playing is False
-            plugin.execute(Command("back", "media", 1, sequence))
+            assert plugin.browse_index.value() == 0
             assert plugin.browse_visible.value() is False
-            plugin.execute(Command("confirm", "media", 1, sequence))
+            sample(MENU)
+            assert plugin.browse_visible.value() is True
+            with_menu(DPAD_DOWN)
+            assert "Preview timeline" in plugin.browse_rows.value()[plugin.browse_index.value()]
             assert str(session.viewed_container.uuid) == viewed_id
             assert playhead.playing is False
-            checks.append("playlist/timeline/media preview leaves source, selection and playback unchanged")
+            with_menu(A)
+            timeline = session.viewed_container
+            assert timeline.name == "Preview timeline", timeline.name
+            assert str(session.inspected_container.uuid) == str(timeline.uuid)
+            assert str(plugin.current_playhead().remote) == str(timeline.playhead.remote)
+            assert timeline.playhead.attrs_by_name_["Pinned Source Mode"].value() is True
+            assert plugin.current_playhead().playing is False
+            assert plugin.browse_marked.value()[plugin.browse_index.value()] is True
+            checks.append("A views highlighted timeline pinned, panel follows, paused kept")
+            plugin.current_playhead().playing = True
+            for _ in range(len(plugin.browse_rows.value())):
+                with_menu(DPAD_UP)
+            assert plugin.browse_rows.value()[plugin.browse_index.value()] == "Controller probe"
+            with_menu(A)
+            assert str(session.viewed_container.uuid) == viewed_id
+            assert str(plugin.current_playhead().remote) == str(playlist.playhead.remote)
+            playhead = plugin.current_playhead()
+            assert playhead.playing is True
+            playhead.playing = False
+            checks.append("A returns to playlist and keeps playing state")
+
+            with_menu(DPAD_RIGHT)
+            assert plugin.mode.value() == "media"
+            assert len(plugin.browse_rows.value()) == 2
+            selection = lambda: [str(item.uuid) for item in playlist.playhead_selection.selected_sources]
+            with_menu(DPAD_DOWN)
+            with_menu(A)
+            assert selection() == [str(other_media.uuid)], selection()
+            assert plugin.browse_marked.value() == [False, True]
+            with_menu(DPAD_UP)
+            sample(MENU | RB)
+            sample(MENU | RB | A)
+            sample(MENU | RB)
+            sample(MENU)
+            assert selection() == [str(media.uuid), str(other_media.uuid)], selection()
+            assert plugin.browse_marked.value() == [True, True]
+            assert plugin.status.value() == "2 media selected"
+            sample()
+            assert plugin.browse_visible.value() is False
+            press(A)
+            assert selection() == [str(media.uuid), str(other_media.uuid)], selection()
+            assert playhead.playing is False
+            checks.append("Menu-gated media A replaces and RB+A toggles real selection")
+
+            with_menu(DPAD_RIGHT)
+            with_menu(DPAD_RIGHT)
+            sample()
+            assert plugin.mode.value() == "viewer"
+            playhead = plugin.current_playhead()
+            playhead.compare_mode = "A/B"
+
+            def key_index():
+                return plugin._request(playhead.remote, key_playhead_index_atom())[0]
+
+            def wait_key(expected):
+                deadline = time.monotonic() + 5
+                while key_index() != expected:
+                    if time.monotonic() > deadline:
+                        raise TimeoutError("Displayed item index %s != %s" % (key_index(), expected))
+                    time.sleep(0.05)
+
+            time.sleep(0.5)
+            start = key_index()
+            assert start in (0, 1), start
+            press(DPAD_DOWN)
+            wait_key(1 - start)
+            press(DPAD_DOWN)
+            wait_key(start)
+            press(DPAD_UP)
+            wait_key(1 - start)
+            assert selection() == [str(media.uuid), str(other_media.uuid)], selection()
+            checks.append("viewer D-pad up/down cycles displayed item of real multi-selection")
             sample(connected=False)
             assert playhead.playing is False
             assert plugin.connected.value() is False
@@ -212,7 +288,7 @@ class RuntimeProbe:
                             function hasGuide(item) {
                                 if (item.visible && item.text !== undefined &&
                                     item.text.indexOf("Controller mode: viewer") === 0 &&
-                                    item.text.indexOf("Menu + D-pad: change mode") !== -1)
+                                    item.text.indexOf("Menu + D-pad left / right: change mode") !== -1)
                                     return true
                                 for (var i = 0; i < item.children.length; ++i)
                                     if (hasGuide(item.children[i])) return true
@@ -220,7 +296,7 @@ class RuntimeProbe:
                             }
                             function hasPreview(item) {
                                 if (item.visible && item.text !== undefined &&
-                                    item.text === "Media preview: Controller probe")
+                                    item.text === "Media: Controller probe")
                                     return true
                                 for (var i = 0; i < item.children.length; ++i)
                                     if (hasPreview(item.children[i])) return true
@@ -252,6 +328,7 @@ class RuntimeProbe:
                         raise TimeoutError("Real UI-model overlay did not render mode and guide")
                     time.sleep(0.1)
                 plugin.execute(Command("toggle_guide", "viewer", 1, sequence))
+                plugin.menu_held.set_value(True)
                 plugin.execute(Command("select_mode", "media", 1, sequence))
                 preview_image = Path(image_path).with_name("controller-browse-preview.png")
                 while not preview_image.exists():

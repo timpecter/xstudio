@@ -5,7 +5,7 @@ import xstudio.qml.helpers 1.0
 
 Item {
     anchors.fill: parent
-    visible: !view.isQuickview && ((connectedValue.value === true && menuValue.value === true) || guideValue.value === true || browseVisible.value === true)
+    visible: !view.isQuickview && ((connectedValue.value === true && menuValue.value === true) || guideValue.value === true)
     XsModuleData {
         id: controllerState
         modelDataName: "controller_input_state"
@@ -33,6 +33,11 @@ Item {
     XsAttributeValue {
         id: browseIndex
         attributeTitle: "Controller Browse Index"
+        model: controllerState
+    }
+    XsAttributeValue {
+        id: browseMarked
+        attributeTitle: "Controller Browse Marked"
         model: controllerState
     }
     XsAttributeValue {
@@ -77,13 +82,13 @@ Item {
                 visible: menuValue.value === true || guideValue.value === true
                 color: "white"
                 font.pixelSize: 18
-                text: "Controller mode: " + (modeValue.value === undefined ? "" : modeValue.value) + (guideValue.value === true ? "\n\n" + statusValue.value + "\n\nMenu + D-pad: change mode" + "\nX: play / pause; View: guide" + "\nViewer: D-pad exposure, A mask, Y loop" + "\nPlaylists / Media: D-pad preview, B close" + "\nA: source activation not available yet" : "")
+                text: "Controller mode: " + (modeValue.value === undefined ? "" : modeValue.value) + (guideValue.value === true ? "\n\n" + statusValue.value + "\n\nMenu + D-pad left / right: change mode" + "\nX: play / pause; View: guide" + "\nViewer: D-pad left / right exposure" + "\nViewer: D-pad up / down previous / next media" + "\nViewer: A mask, Y loop" + "\nPlaylists / Media: hold Menu, D-pad up / down browse, A view" + "\nMedia: Menu + RB + A add / remove from selection" : "")
                 wrapMode: Text.WordWrap
             }
             Column {
                 width: parent.width
                 spacing: 4
-                visible: browseVisible.value === true
+                visible: browseVisible.value === true && menuValue.value === true
                 Text {
                     width: parent.width
                     color: "white"
@@ -105,7 +110,7 @@ Item {
                             verticalAlignment: Text.AlignVCenter
                             color: "white"
                             font.pixelSize: 16
-                            text: modelData
+                            text: (browseMarked.value !== undefined && browseMarked.value[index] === true ? "\u25CF  " : "     ") + modelData
                             elide: Text.ElideRight
                         }
                     }

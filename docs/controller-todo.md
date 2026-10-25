@@ -1,6 +1,6 @@
 # Controller plugin implementation checklist
 
-Source: [controller-plugin-plan.md](controller-plugin-plan.md), reconciled with the brainstorm and the architecture/API investigations. The controller implementation is partial: Windows input, bindings, transport, exposure, mask, loop, and the mode/guide overlay exist; browse/confirm/back source actions remain unavailable. Stage and acceptance boxes stay unchecked until their full exit evidence is met. Current subtask progress, blockers, and verification evidence are recorded below.
+Source: [controller-plugin-plan.md](controller-plugin-plan.md), reconciled with the brainstorm and the architecture/API investigations. The controller implementation is partial: Windows input, bindings, transport, exposure, mask, loop, and the mode/guide overlay exist; Playlists/Media browsing with A activation and RB+A media multi-select exist (not yet user-accepted). Stage and acceptance boxes stay unchecked until their full exit evidence is met. Current subtask progress, blockers, and verification evidence are recorded below.
 
 ## Implementation stages
 
@@ -227,19 +227,76 @@ projector/capture path still needs a runtime trial, so Stage 0 is not complete.
   `ctest --test-dir build_win11 --output-on-failure -R "controller_input_(python|overlay)_test"`
   — **passed**, 2/2. Redeployed with `COPY_PY_PLUGIN_controller_input`;
   the deployed `controller.py` hash matches source.
-- [ ] User acceptance of the Media mode fix and the read-only previews after
-  relaunch with `build_win11\run_xstudio.bat`.
-- [ ] Implement browse-state presentation and browse/confirm/back source
-  activation for playlists, nested sequences, and media. Ensure browsing does
-  not alter session selection or source; confirm must revalidate the target and
-  preserve the agreed global playing/paused state.
+- [x] User accepted the Media mode fix after relaunch. Committed the Python
+  rewrite as `e8b50d48`.
+- [x] Implemented A activation and RB multi-select. The user chose:
+  - A replaces the media selection.
+  - RB+A toggles the highlighted media in or out of the selection.
+  - RB+D-pad only moves the highlight.
+  - Playlist activation also updates the Media panel.
+
+  Behaviour:
+  - Browsing still changes nothing until A is pressed.
+  - Playlists A re-reads the list and revalidates the highlighted candidate.
+    It sets both the inspected and the viewed container, then waits up to 3 s
+    until the global viewer playhead is that container's playhead. Otherwise
+    it raises a visible failure.
+  - Timelines are pinned (`Pinned Source Mode` true).
+  - Media A sets the container's playhead selection. If needed, it first
+    switches the viewer to the media container. A timeline container is
+    unpinned so the selected clips play, matching the Media panel.
+  - RB+A cannot remove the last selected item; it warns instead.
+  - The global playing/paused state is read before and restored after
+    activation.
+  - A `●` marker shows the viewed playlist and selected media.
+  - Media rows show file names instead of full paths.
+  - The guide lists A and RB+A.
+
+  Not covered: rapid successive activation and independent (non-follower)
+  viewers.
+- [x] `ctest --test-dir build_win11 --output-on-failure -R "controller_input_(python|overlay)_test"`
+  — **passed**, 2/2. These include 34 Python tests: bindings, the fake backend
+  for timeline pinning, play-state restore, viewer-switch timeout, replace,
+  toggle and keep-one, the inspected-timeline unpin, and stale-highlight
+  revalidation. The QML test checks the row markers.
+- [x] Disposable GUI probe (launcher in the session `files/` folder, removed
+  afterward) — **passed**, 13 live checks. These include:
+  - A on a real timeline: viewer and Media panel switch, pinned, paused kept.
+  - A back to the playlist: playing kept.
+  - Real A/RB+A presses: replacing and toggling the playhead selection.
+  - The rendered marker overlay, which was checked visually.
+  Redeployed; all deployed files match source by hash.
+- [x] Reworked the layout at the user's request:
+  - Viewer D-pad Left/Right adjusts exposure.
+  - Viewer D-pad Up/Down shows the previous/next media. It sends xSTUDIO's own
+    "Jump to previous/next media/clip" playhead hotkeys, using IDs generated
+    from name + component. In compare modes this cycles the displayed item of
+    the multi-selection; for a single item it steps the playlist selection; in
+    timelines it steps clips.
+  - Menu is now the gate for browsing. Menu + D-pad Left/Right changes mode.
+    In Playlists/Media, Menu + Up/Down browses, Menu + A views, and
+    Menu + RB + A toggles media.
+  - The browse list opens on Menu press and hides on release. No timeout was
+    chosen. Without Menu, Playlists/Media ignore the D-pad and A. B is unused.
+- [x] `ctest --test-dir build_win11 --output-on-failure -R "controller_input_(python|overlay)_test"`
+  — **passed**, 2/2, including 36 Python tests. They cover the new bindings,
+  Menu-gated list visibility and the hotkey message. The QML test checks that
+  the list is hidden without Menu.
+- [x] Disposable GUI probe — **passed**, 14 live checks. These include:
+  - Menu-gated playlist/timeline/media activation and RB+A selection.
+  - Real Up/Down presses in viewer mode cycling the displayed (key) playhead of
+    a two-item A/B selection in both directions.
+  - The updated guide rendering, which was checked visually.
+  Redeployed; all deployed files match source by hash. Probe files were
+  removed.
+- [ ] User acceptance of A activation, RB+A multi-select, Menu-gated browsing
+  and the new viewer D-pad layout after relaunch with
+  `build_win11\run_xstudio.bat`.
 - [ ] Validate guide readability and overlay inclusion on the actual projector
   and video-output path. **Blocked:** no runtime/hardware capture trial has
   been performed; source/QML wiring alone is not acceptance evidence.
 
-**Next implementation task:** implement A/confirm source activation for the
-shared preview candidates through
-the source-backed session APIs, with shared browse state for all overlay
-instances. Stage 0 and Stage 1 remain unchecked: the target/state policy is
-recorded, but source activation, timeline pinning, projector/video-output
-validation, and the remaining acceptance trial are still outstanding.
+**Next implementation task:** after user acceptance, cover rapid successive
+activation and independent viewers. Then run the projector/video-output trial.
+Stage 0 and Stage 1 remain unchecked: projector and video-output validation,
+independent-viewer coverage and the acceptance trial are still outstanding.

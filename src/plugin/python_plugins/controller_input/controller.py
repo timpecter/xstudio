@@ -3,20 +3,28 @@ import json
 import logging
 from pathlib import Path
 from queue import Empty, Queue
+import re
 from threading import Event as StopEvent, Thread
+import time
 
 from xstudio.core import (
     JsonStore, LogLevel, LoopMode, attribute_value_atom, change_attribute_value_atom,
-    colour_pipeline_atom, log_atom, play_atom, redraw_viewport_atom, viewport_atom,
+    Uuid, colour_pipeline_atom, create_playhead_atom, hotkey_event_atom, log_atom, play_atom, redraw_viewport_atom,
+    viewport_atom, viewport_playhead_atom,
 )
 from xstudio.plugin import PluginBase
 
-from .bindings import Bindings
+from .bindings import BROWSE_MODES, Bindings
 from .input import MENU, Edge, Edges, Sample, State, XInputReader
 
 
 LOGGER = logging.getLogger(__name__)
 LEGACY_UUID = "6d11e948-b80d-4409-9c11-d6b4eb30ad13"
+
+
+def _display_name(name):
+    # Media added by path is named after the full path; show the file name like the Media panel.
+    return re.split(r"[\\/]", name.rstrip("\\/"))[-1] or name
 
 
 class StudioLogHandler(logging.Handler):
@@ -71,6 +79,7 @@ class ControllerPlugin(PluginBase):
         self.browse_title = self._state_attribute("Controller Browse Title", "")
         self.browse_rows = self._state_attribute("Controller Browse Rows", [])
         self.browse_index = self._state_attribute("Controller Browse Index", -1)
+        self.browse_marked = self._state_attribute("Controller Browse Marked", [])
         self.add_attribute("Controller Input Overlay", True, {
             "groups": ["viewport_overlay_plugins"],
         }).set_role_data(
@@ -159,8 +168,13 @@ class ControllerPlugin(PluginBase):
                 self._redraw()
             command = self.bindings.accept(event)
             if event.button == MENU:
-                self.menu_held.set_value(self.bindings.menu_held)
-                self._redraw()
+                held = self.bindings.menu_held
+                self.menu_held.set_value(held)
+                if held and self.bindings.mode in BROWSE_MODES:
+                    self._browse(self.bindings.mode)
+                else:
+                    self.browse_visible.set_value(False)
+                    self._redraw()
             if command:
                 self._logger.info("Controller Command: %s", json.dumps({
                     "action": command.action, "mode": command.mode,
@@ -174,7 +188,7 @@ class ControllerPlugin(PluginBase):
             self.mode.set_value(command.mode)
             self.status.set_value("Mode: " + command.mode)
             self.browse_visible.set_value(False)
-            if command.mode in ("playlists", "media"):
+            if command.mode in BROWSE_MODES:
                 self._browse(command.mode)
             else:
                 self._redraw()
@@ -198,16 +212,23 @@ class ControllerPlugin(PluginBase):
             self._exposure(0.25 if action == "exposure_up" else -0.25)
         elif action in ("browse_previous", "browse_next"):
             self._browse(command.mode, -1 if action == "browse_previous" else 1)
-        elif action == "back":
-            self.browse_visible.set_value(False)
-            self.status.set_value("Browse preview closed; source unchanged")
-            self._redraw()
-        elif action == "confirm":
-            self.status.set_value("Source activation is not available yet; preview only")
-            self._logger.warning("Controller Command: %s is not available yet", action)
-            self._redraw()
+        elif action in ("previous_media", "next_media"):
+            self._step_media(action == "next_media")
+        elif action in ("confirm", "toggle_select"):
+            self._activate(command.mode, action == "toggle_select")
         else:
             raise ValueError("Unknown controller action: " + action)
+
+    def _step_media(self, forwards):
+        # Reuse the playhead's Up/Down hotkeys: cycle the multi-selection in compare
+        # modes, step clips in a timeline/string, else step the playlist selection.
+        hotkey = Uuid()
+        hotkey.generate_from_name(
+            ("Jump to next media/clip" if forwards else "Jump to previous media/clip")
+            + "Playback")
+        self.connection.send(
+            self.current_playhead().remote, hotkey_event_atom(), hotkey, True,
+            "controller_input", "", False)
 
     def _exposure(self, delta):
         viewports = self._request(self.events, viewport_atom())[0]
@@ -233,62 +254,114 @@ class ControllerPlugin(PluginBase):
                     JsonStore(target), True)[0]:
                 raise RuntimeError("Controller exposure update was rejected")
 
-    def _browse(self, mode, step=0):
+    def _candidates(self, mode):
         session = self.connection.api.session
         session_id = str(session.uuid)
         if self._browse_context != session_id:
             self._browse_context = session_id
             self._browse_selection.clear()
         if mode == "playlists":
-            entries = []
+            items = []
             for playlist in session.playlists:
-                entries.append((str(playlist.uuid), playlist.name))
+                items.append((str(playlist.uuid), playlist.name, playlist))
                 for child in playlist.containers:
-                    entries.append((str(child.uuid), playlist.name + " / " + child.name))
-            context = (mode, session_id)
+                    items.append((str(child.uuid), playlist.name + " / " + child.name, child))
             viewed = session.viewed_container
-            initial = str(viewed.uuid) if viewed else None
-            title = "Playlists preview"
-        elif mode == "media":
+            active = [str(viewed.uuid)] if viewed else []
+            return (mode, session_id), items, active, "Playlists", None
+        if mode == "media":
             # The viewer may have no container yet; fall back to the Media panel's container.
             container = session.viewed_container or session.inspected_container
             if container is None:
-                context = (mode, None)
-                entries = []
-                initial = None
-                title = "Media preview: no playlist open"
-            else:
-                context = (mode, str(container.uuid))
-                entries = [(str(media.uuid), media.name) for media in container.media]
-                selected = container.playhead_selection.selected_sources
-                initial = str(selected[0].uuid) if selected else None
-                title = "Media preview: " + container.name
-        else:
-            raise ValueError("Browsing is not supported in mode " + mode)
-        identifiers = [entry[0] for entry in entries]
-        previous = self._browse_selection.get(context, initial)
+                return (mode, None), [], [], "Media: no playlist open", None
+            items = [(str(media.uuid), _display_name(media.name), media) for media in container.media]
+            active = [str(media.uuid) for media in container.playhead_selection.selected_sources]
+            return (mode, str(container.uuid)), items, active, "Media: " + container.name, container
+        raise ValueError("Browsing is not supported in mode " + mode)
+
+    def _browse(self, mode, step=0, status=None):
+        context, items, active, title, _ = self._candidates(mode)
+        identifiers = [item[0] for item in items]
+        previous = self._browse_selection.get(context, active[0] if active else None)
         if previous in identifiers:
-            index = max(0, min(len(entries) - 1, identifiers.index(previous) + step))
+            index = max(0, min(len(items) - 1, identifiers.index(previous) + step))
         else:
             if context in self._browse_selection:
-                self._logger.warning("Controller browse candidate was removed; refreshing preview")
+                self._logger.warning("Controller browse candidate was removed; refreshing list")
             index = 0
         self.browse_title.set_value(title)
-        if entries:
+        if items:
             self._browse_selection[context] = identifiers[index]
-            start = max(0, min(index - 3, len(entries) - 7))
-            self.browse_rows.set_value([name for _, name in entries[start:start + 7]])
+            start = max(0, min(index - 3, len(items) - 7))
+            window = items[start:start + 7]
+            self.browse_rows.set_value([item[1] for item in window])
+            self.browse_marked.set_value([item[0] in active for item in window])
             self.browse_index.set_value(index - start)
-            self.status.set_value(
-                "Preview %s of %s; source unchanged" % (index + 1, len(entries)))
+            self.status.set_value(status or "Item %s of %s" % (index + 1, len(items)))
         else:
             self._browse_selection.pop(context, None)
             self.browse_rows.set_value([])
+            self.browse_marked.set_value([])
             self.browse_index.set_value(-1)
-            self.status.set_value("No items to browse; source unchanged")
+            self.status.set_value(status or "No items to browse")
             self._logger.warning("Controller browse: %s is empty", title)
         self.browse_visible.set_value(True)
         self._redraw()
+
+    def _activate(self, mode, toggle=False):
+        context, items, active, _, container = self._candidates(mode)
+        identifiers = [item[0] for item in items]
+        target = self._browse_selection.get(context)
+        if target not in identifiers:
+            self._logger.warning("Controller activation: highlighted item is no longer available")
+            self._browse(mode, status="Highlighted item is no longer available; nothing changed")
+            return
+        name, item = items[identifiers.index(target)][1:]
+        session = self.connection.api.session
+        playing = self._request(self.events, play_atom())[0]
+        if mode == "playlists":
+            playhead = self._show_container(session, item)
+            if item.type == "Timeline":
+                self._set_pinned(playhead, True)
+            status = "Viewing " + name
+        else:
+            if toggle:
+                chosen = set(active) ^ {target}
+                if not chosen:
+                    self._logger.warning("Controller selection: at least one media item must stay selected")
+                    self._browse(mode, status="At least one media item must stay selected")
+                    return
+            else:
+                chosen = {target}
+            selection = [entry[2] for entry in items if entry[0] in chosen]
+            container.playhead_selection.set_selection([media.uuid for media in selection])
+            viewed = session.viewed_container
+            if viewed is None or str(viewed.uuid) != str(container.uuid):
+                playhead = self._show_container(session, container)
+            else:
+                playhead = self._request(container.remote, create_playhead_atom())[0].actor
+            if container.type == "Timeline":
+                # Like the Media panel: unpin so the timeline playhead plays the selected media.
+                self._set_pinned(playhead, False)
+            status = ("%s media selected" % len(selection)) if len(selection) > 1 else "Viewing " + name
+        self._request(self.events, play_atom(), playing)
+        self._logger.info("Controller activation: %s", status)
+        self._browse(mode, status=status)
+
+    def _show_container(self, session, container):
+        session.inspected_container = container
+        session.viewed_container = container
+        playhead = self._request(container.remote, create_playhead_atom())[0].actor
+        deadline = time.monotonic() + 3.0
+        while str(self._request(self.events, viewport_playhead_atom())[0]) != str(playhead):
+            if time.monotonic() > deadline:
+                raise RuntimeError("Viewers did not switch to " + container.name)
+            time.sleep(0.05)
+        return playhead
+
+    def _set_pinned(self, playhead, value):
+        from xstudio.api.session.playhead import Playhead
+        Playhead(self.connection, playhead).attrs_by_name_["Pinned Source Mode"].set_value(value)
 
     def _redraw(self):
         self.connection.send(self.events, redraw_viewport_atom())

@@ -1,5 +1,11 @@
 # Controller plugin working plan
 
+Menu usability update (2026-10-27): Menu now toggles the controller menu open
+and closed on successive presses. Release leaves it open for D-pad mode/browse
+navigation, A activation, and RB+A Media selection. Disconnect closes it.
+This supersedes historical Menu-held wording below and is separate from the
+planned held Shift mapping layer. See the [checklist](controller-todo.md).
+
 Date: 2026-10-24
 
 Status: planning baseline for agent interrogation; not an implementation specification

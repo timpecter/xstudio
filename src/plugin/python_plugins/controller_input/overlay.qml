@@ -11,8 +11,23 @@ Item {
         modelDataName: "controller_input_state"
     }
     XsAttributeValue {
+        id: layerValue
+        attributeTitle: "Controller Layer"
+        model: controllerState
+    }
+    XsAttributeValue {
+        id: shiftValue
+        attributeTitle: "Controller Shift Input"
+        model: controllerState
+    }
+    XsAttributeValue {
+        id: buttonGuideValue
+        attributeTitle: "Controller Button Guide"
+        model: controllerState
+    }
+    XsAttributeValue {
         id: menuValue
-        attributeTitle: "Controller Menu Held"
+        attributeTitle: "Controller Menu Open"
         model: controllerState
     }
     XsAttributeValue {
@@ -82,7 +97,18 @@ Item {
                 visible: menuValue.value === true || guideValue.value === true
                 color: "white"
                 font.pixelSize: 18
-                text: "Controller mode: " + (modeValue.value === undefined ? "" : modeValue.value) + (guideValue.value === true ? "\n\n" + statusValue.value + "\n\nMenu + D-pad left / right: change mode" + "\nX: play / pause; View: guide" + "\nViewer: D-pad left / right exposure" + "\nViewer: D-pad up / down previous / next media" + "\nViewer: A mask, Y loop" + "\nPlaylists / Media: hold Menu, D-pad up / down browse, A view" + "\nMedia: Menu + RB + A add / remove from selection" : "")
+                text: "Controller mode: " + (modeValue.value === undefined ? "" : modeValue.value)
+                    + (layerValue.value === "shifted" ? " / Shifted" : "")
+                    + (guideValue.value === true ? "\n\n" + statusValue.value
+                    + "\n\nMenu: toggle controller menu"
+                    + "\n" + (shiftValue.value === undefined ? "LT" : shiftValue.value) + ": held Shift"
+                    + "\nMenu open: D-pad left / right changes mode"
+                    + "\nMenu closed:\n" + (buttonGuideValue.value === undefined ? "" : buttonGuideValue.value)
+                    + "\nDefault mode (menu closed): D-pad left / right exposure"
+                    + "\nDefault mode (menu closed): D-pad up / down previous / next media"
+                    + "\nMenu open: playlists / media / timeline apply only until the menu closes"
+                    + "\nPlaylists / Media (menu open): D-pad up / down browse, A view"
+                    + "\nMedia (menu open): RT checks, Y clears checks" : "")
                 wrapMode: Text.WordWrap
             }
             Column {
@@ -110,10 +136,22 @@ Item {
                             verticalAlignment: Text.AlignVCenter
                             color: "white"
                             font.pixelSize: 16
-                            text: (browseMarked.value !== undefined && browseMarked.value[index] === true ? "\u25CF  " : "     ") + modelData
+                            text: (modeValue.value === "media"
+                                ? (browseMarked.value !== undefined && browseMarked.value[index] === true
+                                    ? "\u2611  " : "\u2610  ")
+                                : (browseMarked.value !== undefined && browseMarked.value[index] === true
+                                    ? "\u25CF  " : "     ")) + modelData
                             elide: Text.ElideRight
                         }
                     }
+                }
+                Text {
+                    width: parent.width
+                    visible: modeValue.value === "media"
+                    color: "white"
+                    font.pixelSize: 16
+                    text: "RT: check | Y: clear checks\nA: view checked media, or highlighted if none"
+                    wrapMode: Text.WordWrap
                 }
                 Text {
                     width: parent.width

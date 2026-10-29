@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import sys
 import threading
+import tempfile
 import types
 import unittest
 from unittest.mock import Mock, patch
@@ -12,9 +13,9 @@ from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "src" / "plugin" / "python_plugins"))
-from controller_input.bindings import Bindings, Command, MODES
+from controller_input.bindings import Bindings, Command
 from controller_input.input import (
-    A, B, X, Y, MENU, RB, VIEW, DPAD_DOWN, DPAD_LEFT, DPAD_RIGHT, DPAD_UP,
+    A, B, X, Y, MENU, RB, LT, RT, VIEW, DPAD_DOWN, DPAD_LEFT, DPAD_RIGHT, DPAD_UP,
     Edge, Edges, Event, Gamepad, Sample, State, XInputReader, XInputState,
 )
 
@@ -33,10 +34,37 @@ class InputTests(unittest.TestCase):
         def get_state(slot, pointer):
             self.assertEqual(slot, 0)
             pointer._obj.gamepad.buttons = 0xFFFF
+            pointer._obj.gamepad.left_trigger = 128
+            pointer._obj.gamepad.right_trigger = 255
             return 0
 
         reader._get_state = get_state
-        self.assertEqual(reader(), State(True, 0xF3FF))
+        self.assertEqual(reader(), State(True, 0xF3FF, 128, 255))
+
+    def test_trigger_hysteresis_no_repeat_and_order_before_buttons(self):
+        edges = Edges()
+        edges.accept(Sample(1, 1, State(True)))
+        for sequence, value, expected in (
+                (2, 29, []), (3, 30, [(Edge.DOWN, LT), (Edge.DOWN, RT)]),
+                (4, 255, []), (5, 20, []),
+                (6, 19, [(Edge.UP, LT), (Edge.UP, RT)]),
+                (7, 29, [])):
+            events = edges.accept(Sample(1, sequence, State(True, 0, value, value)))
+            self.assertEqual([(e.edge, e.button) for e in events], expected)
+        events = edges.accept(Sample(1, 8, State(True, A, 30)))
+        self.assertEqual([e.button for e in events], [LT, A])
+        self.assertTrue(all(e.buttons == LT | A for e in events))
+
+    def test_reconnect_trigger_baseline_and_stale_sample(self):
+        edges = Edges()
+        connected = edges.accept(Sample(1, 1, State(True, 0, 255, 255)))
+        self.assertEqual([e.edge for e in connected], [Edge.CONNECTED])
+        self.assertEqual(connected[0].buttons, LT | RT)
+        self.assertIsNone(edges.accept(Sample(1, 1, State(True))))
+        self.assertEqual(edges.buttons, LT | RT)
+        edges.accept(Sample(1, 2, State()))
+        connected = edges.accept(Sample(2, 3, State(True, 0, 255)))
+        self.assertEqual(connected[0].buttons, LT)
 
     @unittest.skipUnless(sys.platform == "win32", "Windows error conversion")
     def test_xinput_failure_is_not_disconnect(self):
@@ -81,7 +109,7 @@ class BindingTests(unittest.TestCase):
         self.sequence += 1
         return self.bindings.accept(Event(1, self.sequence, edge, button, button | held))
 
-    def test_viewer_layout(self):
+    def test_default_layout(self):
         for button, action in (
                 (X, "toggle_playback"), (VIEW, "toggle_guide"),
                 (A, "toggle_mask"), (Y, "cycle_loop"),
@@ -91,42 +119,66 @@ class BindingTests(unittest.TestCase):
             self.assertIsNone(self.event(button, Edge.UP))
         self.assertIsNone(self.event(B))
 
-    def test_menu_is_dedicated_modifier_and_four_modes_wrap(self):
+    def test_shift_y_cycles_compare_layout_in_default_mode(self):
+        self.assertIsNone(self.event(LT))
+        command = self.event(Y, held=LT)
+        self.assertEqual((command.action, command.mode), ("cycle_compare", "common"))
+
+    def test_menu_toggles_and_four_modes_wrap_after_release(self):
         self.assertIsNone(self.event(MENU))
-        for button in (X, VIEW, A, Y, B, DPAD_UP, DPAD_DOWN):
+        self.event(MENU, Edge.UP)
+        self.assertTrue(self.bindings.menu_open)
+        self.assertEqual(self.event(X).action, "toggle_playback")
+        for button in (B, DPAD_UP, DPAD_DOWN):
             self.assertIsNone(self.event(button))
-        for mode in ("playlists", "media", "timeline", "viewer"):
+        for mode in ("playlists", "media", "timeline", "common"):
             command = self.event(DPAD_RIGHT)
             self.assertEqual((command.action, command.mode), ("select_mode", mode))
         self.assertEqual(self.event(DPAD_LEFT).mode, "timeline")
         self.event(DPAD_RIGHT)
+        self.event(MENU)
         self.event(MENU, Edge.UP)
+        self.assertFalse(self.bindings.menu_open)
         self.assertEqual(self.event(X).action, "toggle_playback")
 
+    def test_closing_menu_reverts_to_default_mode(self):
+        self.event(MENU)
+        self.event(MENU, Edge.UP)
+        self.event(DPAD_RIGHT)
+        self.assertEqual(self.bindings.mode, "playlists")
+        self.event(MENU)
+        self.event(MENU, Edge.UP)
+        self.assertEqual(self.bindings.mode, "common")
+        self.event(MENU)
+        self.event(MENU, Edge.UP)
+        self.assertEqual(self.bindings.mode, "common")
+
     def test_browsing_requires_menu_and_timeline(self):
-        for mode in MODES[1:3]:
-            self.bindings.mode = mode
-            for button in (A, B, Y, DPAD_UP, DPAD_DOWN, DPAD_LEFT, DPAD_RIGHT):
-                self.assertIsNone(self.event(button))
-            self.assertEqual(self.event(X).action, "toggle_playback")
+        for mode in ("playlists", "media"):
             self.event(MENU)
+            self.event(MENU, Edge.UP)
+            self.bindings.mode = mode
             for button, action in (
                     (DPAD_UP, "browse_previous"), (DPAD_DOWN, "browse_next"), (A, "confirm")):
-                self.assertEqual(self.event(button, held=MENU).action, action)
-            self.assertIsNone(self.event(B, held=MENU))
+                self.assertEqual(self.event(button).action, action)
+            self.assertIsNone(self.event(B))
+            self.event(MENU)
             self.event(MENU, Edge.UP)
+            self.assertEqual(self.bindings.mode, "common")
+            self.assertEqual(self.event(A).action, "toggle_mask")
+            self.event(A, Edge.UP)
         self.event(MENU)
-        self.assertEqual(self.event(A, held=MENU | RB).action, "toggle_select")
-        self.assertIsNone(self.event(RB, held=MENU))
-        self.assertEqual(self.event(DPAD_DOWN, held=MENU | RB).action, "browse_next")
+        self.event(MENU, Edge.UP)
+        self.bindings.mode = "media"
+        self.assertEqual(self.event(A, held=RB).action, "confirm")
+        self.assertEqual(self.event(RT).action, "toggle_select")
+        self.assertEqual(self.event(Y).action, "clear_selection")
+        self.assertIsNone(self.event(RB))
+        self.assertEqual(self.event(DPAD_DOWN, held=RB).action, "browse_next")
         self.bindings.mode = "playlists"
         self.assertEqual(self.event(A, held=MENU | RB).action, "confirm")
-        self.bindings.mode = "viewer"
-        self.assertIsNone(self.event(A, held=MENU))
-        self.event(MENU, Edge.UP)
-        self.assertEqual(self.event(A, held=RB).action, "toggle_mask")
         self.bindings.mode = "timeline"
-        for button in (A, B, Y, DPAD_UP, DPAD_DOWN, DPAD_LEFT, DPAD_RIGHT):
+        for button in (DPAD_UP, DPAD_DOWN):
             self.assertIsNone(self.event(button))
         self.assertEqual(self.event(VIEW).action, "toggle_guide")
 
@@ -135,6 +187,26 @@ class BindingTests(unittest.TestCase):
             self.event(MENU)
             self.assertIsNone(self.event(MENU, edge))
             self.assertEqual(self.event(DPAD_RIGHT).action, "exposure_up")
+
+    def test_held_or_repeated_menu_down_does_not_toggle_again(self):
+        self.event(MENU)
+        self.assertTrue(self.bindings.menu_open)
+        self.event(MENU)
+        self.assertTrue(self.bindings.menu_open)
+        self.event(MENU, Edge.UP)
+        self.assertTrue(self.bindings.menu_open)
+        self.event(MENU)
+        self.assertFalse(self.bindings.menu_open)
+        self.event(MENU)
+        self.assertFalse(self.bindings.menu_open)
+
+    def test_menu_held_on_reconnect_requires_fresh_press(self):
+        self.event(MENU, Edge.CONNECTED)
+        self.event(MENU)
+        self.assertFalse(self.bindings.menu_open)
+        self.event(MENU, Edge.UP)
+        self.event(MENU)
+        self.assertTrue(self.bindings.menu_open)
 
 
 class Attribute:
@@ -151,7 +223,9 @@ class Attribute:
 class FakePluginBase:
     def __init__(self, connection, name):
         self.connection, self.name = connection, name
+        self.uuid = "controller-test-plugin"
         self.attrs = {}
+        self.panels = {}
         self.ui_connected = False
 
     def add_attribute(self, name, value, roles):
@@ -164,6 +238,9 @@ class FakePluginBase:
 
     def connect_to_ui(self):
         self.ui_connected = True
+
+    def register_ui_panel_qml(self, name, qml_code, position_in_menu):
+        self.panels[name] = qml_code
 
     def current_playhead(self):
         return self.connection.playhead
@@ -205,6 +282,9 @@ CONTROLLER = controller_module()
 
 class ControllerTests(unittest.TestCase):
     def setUp(self):
+        self.preset_folder = tempfile.TemporaryDirectory()
+        self.addCleanup(self.preset_folder.cleanup)
+        self.preset_path = Path(self.preset_folder.name) / "presets.json"
         self.connection = Mock()
         self.connection.api.plugin_manager.plugin_detail = []
         self.connection.api.app.global_playhead_events.remote = "events"
@@ -218,10 +298,214 @@ class ControllerTests(unittest.TestCase):
             inspected_container=None)
         self.connection.api.session = self.session
         self.plugin = CONTROLLER.ControllerPlugin(
-            self.connection, reader=lambda: State(), start=False)
+            self.connection, reader=lambda: State(), start=False,
+            preset_path=self.preset_path)
 
     def tearDown(self):
         self.plugin.cleanup()
+
+    def test_registered_mapping_panel_and_shared_revision(self):
+        panel = self.plugin.panels["Controller Mapping"]
+        self.assertIn("controller-test-plugin", panel)
+        first = self.plugin.mapping_snapshot()
+        second = self.plugin.mapping_snapshot()
+        self.assertEqual(first["revision"], second["revision"])
+        changed = self.plugin.edit_mapping(
+            "assign", first["revision"], "common", "b", "toggle_playback")
+        self.assertTrue(changed["ok"])
+        self.assertEqual(changed["state"]["revision"], 1)
+        self.assertEqual(
+            self.plugin.bindings.configuration.action("common", "b"), "toggle_playback")
+        rejected = self.plugin.edit_mapping(
+            "assign", second["revision"], "common", "a", "toggle_playback")
+        self.assertFalse(rejected["ok"])
+        self.assertIn("refresh", rejected["error"])
+        self.assertEqual(rejected["state"]["revision"], 1)
+        restored = self.plugin.edit_mapping("undo", 1)
+        self.assertFalse(restored["state"]["dirty"])
+
+    def test_mapping_edit_updates_dispatch_and_guide_without_restart(self):
+        self.plugin.edit_mapping("assign", 0, "common", "b", "toggle_playback")
+        self.assertIn("B: Play / Pause", self.plugin.button_guide.current)
+        self.assertNotIn("X: Play / Pause", self.plugin.button_guide.current)
+        with patch.object(self.plugin, "execute") as execute:
+            for sequence, buttons in enumerate((0, X, 0, B), 1):
+                self.plugin.accept(Sample(1, sequence, State(True, buttons)))
+            self.assertEqual(execute.call_count, 1)
+            self.assertEqual(execute.call_args.args[0].action, "toggle_playback")
+
+    def test_invalid_mapping_request_reports_error_and_preserves_state(self):
+        before = self.plugin.mapping_snapshot()
+        result = self.plugin.edit_mapping(
+            "assign", 0, "common", "menu", "toggle_playback")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["state"], before)
+        self.assertIn("Unsupported editable button", self.plugin.status.current)
+        self.connection.send.assert_called()
+
+    def test_common_snapshot_guide_and_mode_local_suppression(self):
+        result = self.plugin.edit_mapping("assign", 0, "common", "b", "toggle_mask")
+        self.assertTrue(result["ok"])
+        self.assertIn("common", result["state"]["modes"])
+        self.assertTrue(all(entry["category"] for entry in result["state"]["functions"]))
+        self.assertIn("B: Toggle Mask", self.plugin.button_guide.current)
+        with patch.object(self.plugin, "execute") as execute:
+            for sequence, buttons in enumerate((0, B, 0), 1):
+                self.plugin.accept(Sample(1, sequence, State(True, buttons)))
+            self.assertEqual(execute.call_count, 1)
+            self.assertEqual(execute.call_args.args[0].action, "toggle_mask")
+        self.plugin.edit_mapping("assign", 1, "timeline", "a", "toggle_mask")
+        self.plugin.bindings.mode = "timeline"
+        self.plugin.execute(Command("select_mode", "timeline", 1, 1))
+        self.assertNotIn("B: Toggle Mask", self.plugin.button_guide.current)
+        self.assertIn("A: Toggle Mask", self.plugin.button_guide.current)
+        inherited = next(entry for entry in self.plugin.mapping_snapshot()["effective"]
+                         if entry["mode"] == "timeline" and entry["button"] == "b")
+        self.assertEqual(inherited["source"], "suppressed")
+        self.plugin.edit_mapping("assign", 2, "timeline", "a", None)
+        self.assertIn("B: Toggle Mask", self.plugin.button_guide.current)
+
+    def test_shift_confirmation_atomic_undo_and_snapshot(self):
+        self.plugin.edit_mapping("assign", 0, "common", "b", "exposure_up", "shifted")
+        before = self.plugin.mapping_snapshot()
+        pending = self.plugin.edit_mapping("shift", 1, button="b")
+        self.assertFalse(pending["ok"])
+        self.assertEqual(pending["code"], "shift_conflict")
+        self.assertIn("common / shifted: Exposure Up", pending["error"])
+        self.assertEqual(pending["state"], before)
+        changed = self.plugin.edit_mapping("shift", 1, button="b", confirmed=True)
+        self.assertTrue(changed["ok"])
+        self.assertEqual(changed["state"]["shift"], "b")
+        self.assertEqual(self.plugin.shift_button.current, "B")
+        self.assertFalse(any(b["button"] == "b" for b in changed["state"]["bindings"]))
+        self.assertTrue(self.plugin.edit_mapping("undo", 2)["ok"])
+        self.assertEqual(self.plugin.bindings.configuration.shift, "lt")
+        self.assertEqual(self.plugin.bindings.configuration.action(
+            "common", "b", "shifted"), "exposure_up")
+        self.assertFalse(self.plugin.edit_mapping("shift", 1, button="x", confirmed=True)["ok"])
+        self.assertFalse(self.plugin.edit_mapping("shift", 3, button="a")["ok"])
+
+    def test_real_trigger_samples_publish_shift_layer_and_dispatch(self):
+        self.plugin.edit_mapping("assign", 0, "common", "b", "toggle_mask", "shifted")
+        with patch.object(self.plugin, "execute") as execute:
+            for sequence, state in enumerate((
+                    State(True), State(True, 0, 30), State(True, B, 255),
+                    State(True, B, 20), State(True, B, 19), State(True),
+                    State(True, B)), 1):
+                self.plugin.accept(Sample(1, sequence, state))
+            self.assertEqual(execute.call_count, 1)
+            self.assertEqual(execute.call_args.args[0].action, "toggle_mask")
+        self.assertEqual(self.plugin.layer.current, "normal")
+        self.assertEqual(self.plugin.mapping_snapshot()["active_layer"], "normal")
+        self.plugin.accept(Sample(1, 8, State(True, 0, 30)))
+        self.assertEqual(self.plugin.layer.current, "shifted")
+        self.assertIn("B: Toggle Mask", self.plugin.button_guide.current)
+        self.plugin.accept(Sample(1, 9, State()))
+        self.assertEqual(self.plugin.layer.current, "normal")
+
+    def test_preset_save_load_discard_cancel_and_restart(self):
+        self.plugin.edit_mapping("assign", 0, "common", "b", "toggle_playback")
+        saved = self.plugin.preset_operation("save_as", 1, {"name": "Review"})
+        self.assertTrue(saved["ok"])
+        self.assertFalse(saved["state"]["dirty"])
+        self.plugin.edit_mapping("assign", 2, "common", "a", "toggle_playback")
+        cancelled = self.plugin.preset_operation(
+            "load", 3, {"name": "Factory", "decision": "cancel"})
+        self.assertTrue(cancelled["state"]["dirty"])
+        self.assertEqual(cancelled["state"]["selected_preset"], "Review")
+        loaded = self.plugin.preset_operation(
+            "load", 3, {"name": "Factory", "decision": "save"})
+        self.assertTrue(loaded["ok"])
+        self.assertFalse(loaded["state"]["can_undo"])
+        self.assertEqual(self.plugin.presets.get("Review").action(
+            "common", "a"), "toggle_playback")
+        self.plugin.preset_operation("load", 4, {"name": "Review"})
+        self.plugin.edit_mapping("assign", 5, "common", "x", "toggle_playback")
+        self.assertEqual(self.plugin.presets.configuration.action("common", "a"), "toggle_playback")
+        from controller_input.presets import PresetStore
+        restarted = PresetStore(self.preset_path)
+        self.assertEqual(restarted.selected, "Review")
+        self.assertEqual(restarted.configuration.action("common", "a"), "toggle_playback")
+        discarded = self.plugin.preset_operation(
+            "load", 6, {"name": "Factory", "decision": "discard"})
+        self.assertTrue(discarded["ok"])
+        self.assertFalse(discarded["state"]["dirty"])
+
+    def test_save_failure_prevents_load_and_keeps_history(self):
+        self.plugin.edit_mapping("assign", 0, "common", "b", "toggle_playback")
+        self.plugin.preset_operation("save_as", 1, {"name": "Review"})
+        self.plugin.edit_mapping("assign", 2, "common", "a", "toggle_playback")
+        before = self.preset_path.read_bytes()
+        with patch("controller_input.presets.os.replace", side_effect=PermissionError("locked")):
+            result = self.plugin.preset_operation(
+                "load", 3, {"name": "Factory", "decision": "save"})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["state"]["revision"], 3)
+        self.assertTrue(result["state"]["dirty"])
+        self.assertTrue(result["state"]["can_undo"])
+        self.assertEqual(self.plugin.presets.selected, "Review")
+        self.assertEqual(self.preset_path.read_bytes(), before)
+
+    def test_factory_save_as_switch_import_export_and_stale_dialog(self):
+        self.plugin.edit_mapping("assign", 0, "common", "b", "toggle_playback")
+        self.assertFalse(self.plugin.preset_operation("save", 1, {})["ok"])
+        export = Path(self.preset_folder.name) / "export with spaces.json"
+        result = self.plugin.preset_operation("export", 1, {"path": export.as_uri()})
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["state"]["dirty"])
+        self.assertFalse(self.preset_path.exists())
+        self.plugin.preset_operation("save_as", 1, {"name": "Review"})
+        duplicate = self.plugin.preset_operation("save_as", 2, {"name": "Review"})
+        self.assertEqual(duplicate["code"], "exists")
+        self.plugin.edit_mapping("assign", 2, "common", "a", "toggle_playback")
+        self.assertFalse(self.plugin.preset_operation(
+            "save_as", 2, {"name": "Review", "replace": True})["ok"])
+        loaded = self.plugin.preset_operation("load", 3, {
+            "name": "Review", "decision": "save", "save_name": "Experiment"})
+        self.assertTrue(loaded["ok"])
+        self.assertEqual(self.plugin.presets.selected, "Review")
+        self.assertEqual(self.plugin.presets.get("Experiment").action(
+            "common", "a"), "toggle_playback")
+
+    def test_preset_load_rearms_held_button_and_clears_history(self):
+        self.plugin.edit_mapping("assign", 0, "common", "b", "toggle_playback")
+        self.plugin.preset_operation("save_as", 1, {"name": "Review"})
+        self.plugin.bindings.accept(Event(1, 1, Edge.DOWN, X, X))
+        loaded = self.plugin.preset_operation("load", 2, {"name": "Factory"})
+        self.assertTrue(loaded["ok"])
+        self.assertIsNone(self.plugin.bindings.accept(Event(1, 2, Edge.DOWN, X, X)))
+        self.plugin.bindings.accept(Event(1, 3, Edge.UP, X, 0))
+        self.assertEqual(self.plugin.bindings.accept(
+            Event(1, 4, Edge.DOWN, X, X)).action, "toggle_playback")
+        self.assertFalse(loaded["state"]["can_undo"])
+
+    def test_import_does_not_activate_and_export_does_not_save(self):
+        export = Path(self.preset_folder.name) / "experiment.json"
+        self.plugin.edit_mapping("assign", 0, "common", "b", "toggle_playback")
+        self.plugin.preset_operation("export", 1, {"path": export.as_uri()})
+        imported = self.plugin.preset_operation("import", 1, {"path": export.as_uri()})
+        self.assertTrue(imported["ok"])
+        self.assertEqual(imported["state"]["selected_preset"], "Factory")
+        self.assertTrue(imported["state"]["dirty"])
+        self.assertEqual(self.plugin.bindings.configuration.action(
+            "common", "b"), "toggle_playback")
+        from controller_input.presets import PresetStore
+        self.assertEqual(PresetStore(self.preset_path).selected, "Factory")
+
+    def test_replacing_current_import_marks_unchanged_working_copy_dirty(self):
+        self.plugin.preset_operation("save_as", 0, {"name": "Review"})
+        export = Path(self.preset_folder.name) / "experiment.json"
+        self.plugin.edit_mapping("assign", 1, "common", "b", "toggle_playback")
+        self.plugin.preset_operation("export", 2, {"path": export.as_uri()})
+        self.plugin.edit_mapping("undo", 2)
+        imported = self.plugin.preset_operation(
+            "import", 3, {"path": export.as_uri(), "replace": True})
+        self.assertTrue(imported["ok"])
+        self.assertTrue(imported["state"]["dirty"])
+        self.assertEqual(self.plugin.bindings.configuration.action(
+            "common", "x"), "toggle_playback")
+        self.assertEqual(self.plugin.presets.configuration.action(
+            "common", "b"), "toggle_playback")
 
     @staticmethod
     def container(uuid, name, media=(), selected=(), kind="Playlist"):
@@ -258,7 +542,7 @@ class ControllerTests(unittest.TestCase):
         self.connection.request_receive_timeout.side_effect = request
         self.plugin._set_pinned = Mock()
 
-    def command(self, action, mode="viewer"):
+    def command(self, action, mode="common"):
         self.plugin.execute(Command(action, mode, 1, 1))
 
     def test_ui_registration_badge_independent_of_guide(self):
@@ -315,16 +599,16 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(bridge.roles["attr_enabled"])
         self.assertIn("take_log_records", bridge.roles["qml_code"])
 
-    def test_menu_visibility_tracks_press_release_and_disconnect(self):
+    def test_menu_visibility_tracks_toggle_and_disconnect(self):
         for sequence, (state, expected) in enumerate((
                 (State(True), False), (State(True, MENU), True),
                 (State(True, MENU | DPAD_DOWN), True),
-                (State(True, DPAD_DOWN), False),
-                (State(True, MENU), True), (State(), False)), 1):
+                (State(True, DPAD_DOWN), True),
+                (State(True, MENU), False), (State(), False)), 1):
             self.plugin.accept(Sample(1, sequence, state))
-            self.assertIs(self.plugin.menu_held.current, expected)
+            self.assertIs(self.plugin.menu_open.current, expected)
         self.plugin.accept(Sample(2, 7, State(True, MENU)))
-        self.assertFalse(self.plugin.menu_held.current)
+        self.assertFalse(self.plugin.menu_open.current)
         self.assertFalse(self.plugin.browse_visible.current)
 
     def test_browse_highlights_without_selection_source_or_transport_writes(self):
@@ -428,30 +712,62 @@ class ControllerTests(unittest.TestCase):
                 self.command("confirm", "playlists")
         self.assertEqual(self.play_writes, [])
 
-    def test_media_a_replaces_and_rb_a_toggles_selection(self):
+    def test_media_checks_are_staged_clearable_and_applied_by_a(self):
         self.serve_activation()
         self.command("select_mode", "media")
         self.command("browse_next", "media")
         self.command("confirm", "media")
         selection = self.playlist.playhead_selection
         self.assertEqual(selection.selected_sources, [self.media[1]])
-        self.assertEqual(self.plugin.browse_marked.current, [False, True])
+        self.assertEqual(self.plugin.browse_marked.current, [False, False])
         self.assertEqual(self.plugin.status.current, "Viewing Second media")
         self.command("browse_previous", "media")
         self.command("toggle_select", "media")
-        self.assertEqual(selection.selected_sources, self.media)
+        self.assertEqual(selection.selected_sources, [self.media[1]])
+        self.assertEqual(self.plugin.browse_marked.current, [True, False])
+        self.assertEqual(self.play_writes, [False])
+        self.command("browse_next", "media")
+        self.command("toggle_select", "media")
         self.assertEqual(self.plugin.browse_marked.current, [True, True])
+        self.command("confirm", "media")
+        self.assertEqual(selection.selected_sources, self.media)
         self.assertEqual(self.plugin.status.current, "2 media selected")
         self.command("toggle_select", "media")
+        self.assertEqual(selection.selected_sources, self.media)
+        self.command("clear_selection", "media")
+        self.assertEqual(self.plugin.browse_marked.current, [False, False])
+        self.assertEqual(selection.selected_sources, self.media)
+        self.command("confirm", "media")
         self.assertEqual(selection.selected_sources, [self.media[1]])
-        self.command("browse_next", "media")
-        with self.assertLogs(CONTROLLER.LOGGER, level="WARNING"):
-            self.command("toggle_select", "media")
-        self.assertEqual(selection.selected_sources, [self.media[1]])
-        self.assertIn("at least one", self.plugin.status.current.lower())
         self.assertEqual(self.play_writes, [False, False, False])
         self.assertIs(self.session.viewed_container, self.playlist)
         self.plugin._set_pinned.assert_not_called()
+
+    def test_checks_are_per_container_pruned_and_clearing_does_not_activate(self):
+        self.serve_activation()
+        self.command("select_mode", "media")
+        self.command("toggle_select", "media")
+        self.assertEqual(self.plugin.browse_marked.current, [True, False])
+        self.assertEqual(self.play_writes, [])
+        self.playlist.media.pop(0)
+        with self.assertLogs(CONTROLLER.LOGGER, level="WARNING"):
+            self.command("browse_next", "media")
+        self.assertEqual(self.plugin.browse_marked.current, [False])
+        self.command("toggle_select", "media")
+        other = self.container("p2", "Other", self.media)
+        self.session.viewed_container = other
+        self.command("select_mode", "media")
+        self.assertEqual(self.plugin.browse_marked.current, [False, False])
+        self.command("clear_selection", "media")
+        self.assertEqual(self.play_writes, [])
+        self.session.viewed_container = self.playlist
+        self.command("select_mode", "media")
+        self.assertEqual(self.plugin.browse_marked.current, [True])
+        self.command("clear_selection", "media")
+        self.command("toggle_select", "media")
+        self.command("toggle_select", "media")
+        self.assertEqual(self.plugin.browse_marked.current, [False])
+        self.assertEqual(self.play_writes, [])
 
     def test_media_activation_views_inspected_timeline_unpinned(self):
         clip = types.SimpleNamespace(uuid="m9", name="C:\\shots\\sh010\\plate.0001.exr")
@@ -506,7 +822,8 @@ class ControllerTests(unittest.TestCase):
 
     def test_cleanup_unregisters_only_this_plugins_log_handler(self):
         other = CONTROLLER.ControllerPlugin(
-            self.connection, reader=lambda: State(), start=False)
+            self.connection, reader=lambda: State(), start=False,
+            preset_path=self.preset_path)
         try:
             self.plugin.cleanup()
             self.assertNotIn(self.plugin._log_handler, self.plugin._logger.handlers)
@@ -535,7 +852,7 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(calls[0].args[:2], (2000, "events"))
         self.assertTrue(calls[1].args[-1])
 
-    def test_browse_list_is_visible_only_while_menu_is_held(self):
+    def test_browse_list_stays_open_until_second_menu_press(self):
         self.plugin.accept(Sample(1, 1, State(True)))
         self.plugin.accept(Sample(1, 2, State(True, MENU)))
         self.assertFalse(self.plugin.browse_visible.current)
@@ -544,21 +861,91 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(self.plugin.browse_visible.current)
         self.plugin.accept(Sample(1, 4, State(True, MENU)))
         self.plugin.accept(Sample(1, 5, State(True)))
-        self.assertFalse(self.plugin.browse_visible.current)
-        self.assertFalse(self.plugin.menu_held.current)
+        self.assertTrue(self.plugin.browse_visible.current)
+        self.assertTrue(self.plugin.menu_open.current)
         self.plugin.accept(Sample(1, 6, State(True, DPAD_DOWN)))
-        self.assertFalse(self.plugin.browse_visible.current)
+        self.assertTrue(self.plugin.browse_visible.current)
         self.plugin.accept(Sample(1, 7, State(True, MENU)))
+        self.assertFalse(self.plugin.browse_visible.current)
+        self.assertFalse(self.plugin.menu_open.current)
+        self.assertEqual(self.plugin.mode.current, "common")
+        self.plugin.accept(Sample(1, 8, State(True)))
+        self.plugin.accept(Sample(1, 9, State(True, MENU)))
+        self.assertFalse(self.plugin.browse_visible.current)
+        self.assertEqual(self.plugin.mode.current, "common")
+        self.plugin.accept(Sample(1, 10, State(True)))
+        self.plugin.accept(Sample(1, 11, State(True, DPAD_RIGHT)))
+        self.assertEqual(self.plugin.mode.current, "playlists")
         self.assertTrue(self.plugin.browse_visible.current)
         self.assertEqual(self.plugin.browse_index.current, 0)
-        self.plugin.accept(Sample(1, 8, State(True, MENU | DPAD_RIGHT)))
+        self.plugin.accept(Sample(1, 12, State(True)))
+        self.plugin.accept(Sample(1, 13, State(True, DPAD_RIGHT)))
         self.assertEqual(self.plugin.browse_title.current, "Media: Review")
-        self.plugin.accept(Sample(1, 9, State(True, MENU)))
-        self.plugin.accept(Sample(1, 10, State(True, MENU | DPAD_RIGHT)))
+        self.plugin.accept(Sample(1, 14, State(True)))
+        self.plugin.accept(Sample(1, 15, State(True, DPAD_RIGHT)))
         self.assertEqual(self.plugin.mode.current, "timeline")
         self.assertFalse(self.plugin.browse_visible.current)
         overlay = self.plugin.attrs["Controller Input Overlay"].roles["qml_code"]
         self.assertIn("browseVisible.value === true && menuValue.value === true", overlay)
+
+    def test_menu_selection_without_holding_and_guide_independence(self):
+        samples = (0, MENU, 0, DPAD_RIGHT, 0, A, 0, RB, RB | A, 0)
+        with patch.object(self.plugin, "_activate") as activate:
+            for sequence, buttons in enumerate(samples, 1):
+                self.plugin.accept(Sample(1, sequence, State(True, buttons)))
+            self.assertTrue(self.plugin.menu_open.current)
+            self.assertTrue(self.plugin.browse_visible.current)
+            self.assertEqual(activate.call_args_list, [
+                unittest.mock.call("playlists", False), unittest.mock.call("playlists", False)])
+        self.plugin.guide.set_value(True)
+        self.plugin.accept(Sample(1, 11, State(True, MENU)))
+        self.plugin.accept(Sample(1, 12, State(True)))
+        self.assertFalse(self.plugin.menu_open.current)
+        self.assertFalse(self.plugin.browse_visible.current)
+        self.assertTrue(self.plugin.guide.current)
+
+    def test_menu_release_does_not_refresh_or_reset_browse_highlight(self):
+        self.session.playlists.append(self.container("p2", "Second"))
+        with patch.object(self.plugin, "_browse", wraps=self.plugin._browse) as browse:
+            for sequence, buttons in enumerate(
+                    (0, MENU, 0, DPAD_RIGHT, 0, DPAD_DOWN, 0), 1):
+                self.plugin.accept(Sample(1, sequence, State(True, buttons)))
+            self.assertEqual(self.plugin.browse_index.current, 1)
+            self.assertEqual(browse.call_count, 2)
+            self.assertTrue(self.plugin.menu_open.current)
+
+    def test_cycle_compare_advances_and_skips_rejected_layouts(self):
+        class Playhead:
+            accepted = ("Off", "A/B", "Grid")
+
+            def __init__(self):
+                self.layout = "Off"
+
+            @property
+            def compare_mode(self):
+                return self.layout
+
+            @compare_mode.setter
+            def compare_mode(self, value):
+                if value in self.accepted:
+                    self.layout = value
+
+        self.connection.playhead = Playhead()
+        seen = []
+        for _ in range(4):
+            self.command("cycle_compare", "common")
+            seen.append(self.connection.playhead.layout)
+        self.assertEqual(seen, ["A/B", "Grid", "Off", "A/B"])
+        self.assertEqual(self.plugin.status.current, "Compare: A/B")
+
+    def test_media_mode_checks_several_items_then_views_them_together(self):
+        self.media.append(types.SimpleNamespace(uuid="m3", name="Third media"))
+        self.playlist.media = list(self.media)
+        for sequence, buttons in enumerate((
+                0, MENU, 0, DPAD_RIGHT, 0, DPAD_RIGHT, 0, RT, 0, DPAD_DOWN, 0, DPAD_DOWN, 0, RT, 0), 1):
+            self.plugin.accept(Sample(1, sequence, State(True, buttons, 255 if buttons == RT else 0)))
+        self.assertEqual(self.plugin.mode.current, "media")
+        self.assertEqual(self.plugin.browse_marked.current[:3], [True, False, True])
 
     def test_viewer_up_down_step_media_through_playhead_hotkeys(self):
         self.connection.playhead.remote = "playhead"
@@ -620,7 +1007,7 @@ class ControllerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.command("invalid")
         with self.assertRaisesRegex(ValueError, "not supported"):
-            self.command("confirm", "viewer")
+            self.command("confirm", "common")
 
     def test_legacy_plugin_prevents_dual_dispatch(self):
         detail = Mock()
@@ -653,7 +1040,8 @@ class ControllerTests(unittest.TestCase):
             ready.set()
             return State()
 
-        plugin = CONTROLLER.ControllerPlugin(self.connection, reader=read)
+        plugin = CONTROLLER.ControllerPlugin(
+            self.connection, reader=read, preset_path=self.preset_path)
         self.assertTrue(ready.wait(1))
         threads = list(plugin._threads)
         plugin.cleanup()

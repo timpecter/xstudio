@@ -50,7 +50,7 @@ class RuntimeProbe:
 
             from controller_input.bindings import Bindings, Command
             from controller_input.input import (
-                A, RB, X, Y, MENU, VIEW, DPAD_DOWN, DPAD_RIGHT, DPAD_UP, Edges, Sample, State)
+                A, RT, X, Y, MENU, VIEW, DPAD_DOWN, DPAD_RIGHT, DPAD_UP, Edges, Sample, State)
             from xstudio.core import key_playhead_index_atom
             from xstudio.core import LoopMode, viewport_atom, colour_pipeline_atom, attribute_value_atom
 
@@ -77,9 +77,10 @@ class RuntimeProbe:
                 sample()
 
             def with_menu(buttons):
-                sample(MENU)
-                sample(MENU | buttons)
-                sample(MENU)
+                if not plugin.bindings.menu_open:
+                    press(MENU)
+                press(buttons)
+                press(MENU)
 
             overlay = plugin.get_attribute("Controller Input Overlay")
             assert overlay.value() is True, overlay.as_json()
@@ -90,15 +91,18 @@ class RuntimeProbe:
             sample()
             assert plugin.connected.value() is True
             assert plugin.guide.value() is False
-            assert plugin.mode.value() == "viewer"
-            assert plugin.menu_held.value() is False
+            assert plugin.mode.value() == "common"
+            assert plugin.menu_open.value() is False
             sample(MENU)
-            assert plugin.menu_held.value() is True
+            assert plugin.menu_open.value() is True
             sample(MENU | DPAD_RIGHT)
             assert plugin.browse_visible.value() is True
             sample()
+            assert plugin.browse_visible.value() is True
+            assert plugin.menu_open.value() is True
+            press(MENU)
             assert plugin.browse_visible.value() is False
-            assert plugin.menu_held.value() is False
+            assert plugin.menu_open.value() is False
             assert plugin.mode.value() == "playlists"
             assert plugin.guide.value() is False
             press(VIEW)
@@ -108,8 +112,8 @@ class RuntimeProbe:
             assert plugin.mode.value() == "playlists"
             checks.append("real UI attributes, mode changes and independent guide")
 
-            plugin.bindings.mode = "viewer"
-            plugin.execute(Command("select_mode", "viewer", 1, sequence))
+            plugin.bindings.mode = "common"
+            plugin.execute(Command("select_mode", "common", 1, sequence))
             playhead = plugin.current_playhead()
             playhead.looping = LoopMode.LM_LOOP
             for expected in (LoopMode.LM_PLAY_ONCE, LoopMode.LM_PING_PONG, LoopMode.LM_LOOP):
@@ -129,9 +133,9 @@ class RuntimeProbe:
             pipeline = plugin._request(viewports[0], colour_pipeline_atom())[0]
             exposure = lambda: plugin._request(pipeline, attribute_value_atom(), "Exposure (E)")[0].get()
             before = exposure()
-            plugin.execute(Command("exposure_up", "viewer", 1, sequence))
+            plugin.execute(Command("exposure_up", "common", 1, sequence))
             assert abs(exposure() - min(10.0, before + 0.25)) < 0.0001
-            plugin.execute(Command("exposure_down", "viewer", 1, sequence))
+            plugin.execute(Command("exposure_down", "common", 1, sequence))
             assert abs(exposure() - before) < 0.0001
             checks.append("real viewer relative exposure")
 
@@ -169,7 +173,7 @@ class RuntimeProbe:
             playlist.playhead_selection.set_selection([media.uuid])
             viewed_id = str(session.viewed_container.uuid)
             selected_ids = [str(item.uuid) for item in playlist.playhead_selection.selected_sources]
-            plugin.bindings.mode = "viewer"
+            plugin.bindings.mode = "common"
             with_menu(DPAD_RIGHT)
             sample()
             assert plugin.mode.value() == "playlists"
@@ -213,26 +217,29 @@ class RuntimeProbe:
             with_menu(DPAD_DOWN)
             with_menu(A)
             assert selection() == [str(other_media.uuid)], selection()
-            assert plugin.browse_marked.value() == [False, True]
+            assert plugin.browse_marked.value() == [False, False]
             with_menu(DPAD_UP)
-            sample(MENU | RB)
-            sample(MENU | RB | A)
-            sample(MENU | RB)
-            sample(MENU)
+            press(MENU)
+            press(RT)
+            assert selection() == [str(other_media.uuid)], selection()
+            press(DPAD_DOWN)
+            press(RT)
+            assert selection() == [str(other_media.uuid)], selection()
+            press(A)
             assert selection() == [str(media.uuid), str(other_media.uuid)], selection()
             assert plugin.browse_marked.value() == [True, True]
             assert plugin.status.value() == "2 media selected"
-            sample()
+            press(MENU)
             assert plugin.browse_visible.value() is False
             press(A)
             assert selection() == [str(media.uuid), str(other_media.uuid)], selection()
             assert playhead.playing is False
-            checks.append("Menu-gated media A replaces and RB+A toggles real selection")
+            checks.append("RT stages checked media without changing viewer; A applies checked group")
 
             with_menu(DPAD_RIGHT)
             with_menu(DPAD_RIGHT)
             sample()
-            assert plugin.mode.value() == "viewer"
+            assert plugin.mode.value() == "common"
             playhead = plugin.current_playhead()
             playhead.compare_mode = "A/B"
 
@@ -264,8 +271,8 @@ class RuntimeProbe:
             image_path = os.environ.get("CONTROLLER_PROBE_OVERLAY_IMAGE")
             if image_path:
                 plugin.connected.set_value(True)
-                plugin.execute(Command("select_mode", "viewer", 1, sequence))
-                plugin.execute(Command("toggle_guide", "viewer", 1, sequence))
+                plugin.execute(Command("select_mode", "common", 1, sequence))
+                plugin.execute(Command("toggle_guide", "common", 1, sequence))
                 hud_folder = Path(__file__).resolve().parents[3] / "ui" / "qml" / "xstudio" / "application" / "panels" / "viewport" / "hud"
                 item = plugin.create_qml_item("""
                     import QtQuick
@@ -287,8 +294,8 @@ class RuntimeProbe:
                             running: true
                             function hasGuide(item) {
                                 if (item.visible && item.text !== undefined &&
-                                    item.text.indexOf("Controller mode: viewer") === 0 &&
-                                    item.text.indexOf("Menu + D-pad left / right: change mode") !== -1)
+                                    item.text.indexOf("Controller mode: common") === 0 &&
+                                    item.text.indexOf("Menu: toggle controller menu") !== -1)
                                     return true
                                 for (var i = 0; i < item.children.length; ++i)
                                     if (hasGuide(item.children[i])) return true
@@ -327,8 +334,8 @@ class RuntimeProbe:
                     if time.monotonic() > deadline:
                         raise TimeoutError("Real UI-model overlay did not render mode and guide")
                     time.sleep(0.1)
-                plugin.execute(Command("toggle_guide", "viewer", 1, sequence))
-                plugin.menu_held.set_value(True)
+                plugin.execute(Command("toggle_guide", "common", 1, sequence))
+                plugin.menu_open.set_value(True)
                 plugin.execute(Command("select_mode", "media", 1, sequence))
                 preview_image = Path(image_path).with_name("controller-browse-preview.png")
                 while not preview_image.exists():

@@ -14,6 +14,10 @@ if(WIN32)
         find_program(CONTROLLER_QMLTESTRUNNER qmltestrunner
             HINTS "${Qt6_DIR}/../../../bin")
         if(CONTROLLER_QMLTESTRUNNER)
+            add_test(NAME controller_input_mapping_test
+                COMMAND ${Python_EXECUTABLE} -B
+                    "${PROJECT_SOURCE_DIR}/python/test/controller_input/check_mapping.py"
+                    "${CONTROLLER_QMLTESTRUNNER}")
             add_test(NAME controller_input_overlay_test
                 COMMAND ${Python_EXECUTABLE} -B
                     "${PROJECT_SOURCE_DIR}/python/test/controller_input/check_overlay.py"

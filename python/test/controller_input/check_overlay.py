@@ -28,10 +28,12 @@ Item {
         property bool connected: false
         property bool guide: false
         property bool menu: false
+        property string layer: "normal"
         property bool browsing: false
         property var rows: ["Review", "Dailies"]
-        property string mode: "viewer"
+        property string mode: "common"
         property string status: "Controller connected"
+        property string buttonGuide: "X: Play / Pause\\nVIEW: Controller Guide"
     }
     component XsModuleData: QtObject {
         property string modelDataName
@@ -41,12 +43,15 @@ Item {
         property QtObject model
         readonly property var value: attributeTitle === "Controller Connected" ? state.connected :
             attributeTitle === "Controller Mode" ? state.mode :
-            attributeTitle === "Controller Menu Held" ? state.menu :
+            attributeTitle === "Controller Layer" ? state.layer :
+            attributeTitle === "Controller Shift Input" ? "LT" :
+            attributeTitle === "Controller Menu Open" ? state.menu :
             attributeTitle === "Controller Browse Visible" ? state.browsing :
             attributeTitle === "Controller Browse Rows" ? state.rows :
             attributeTitle === "Controller Browse Index" ? 1 :
             attributeTitle === "Controller Browse Title" ? "Playlists" :
             attributeTitle === "Controller Browse Marked" ? [false, true] :
+            attributeTitle === "Controller Button Guide" ? state.buttonGuide :
             attributeTitle === "Controller Guide" ? state.guide : state.status
     }
     PRODUCTION_OVERLAY
@@ -67,7 +72,7 @@ Item {
             compare(overlay.visible, false)
             state.menu = true
             tryCompare(overlay, "visible", true)
-            tryCompare(guideText, "text", "Controller mode: viewer")
+            tryCompare(guideText, "text", "Controller mode: common")
             var badge = content.parent
             verify(badge.width >= 360, "badge width")
             verify(badge.x >= 0 && badge.y >= 0, "badge origin")
@@ -77,7 +82,12 @@ Item {
             tryCompare(guideText, "text", "Controller mode: playlists")
             var closedHeight = badge.height
             state.guide = true
-            tryVerify(function() { return guideText.text.indexOf("Menu + D-pad") !== -1 })
+            tryVerify(function() { return guideText.text.indexOf("Menu: toggle controller menu") !== -1 })
+            verify(guideText.text.indexOf("hold Menu") === -1)
+            tryVerify(function() { return guideText.text.indexOf("X: Play / Pause") !== -1 })
+            state.buttonGuide = "B: Play / Pause\\nVIEW: Controller Guide"
+            tryVerify(function() { return guideText.text.indexOf("B: Play / Pause") !== -1 })
+            verify(guideText.text.indexOf("X: Play / Pause") === -1)
             tryVerify(function() { return badge.height > closedHeight }, 1000, "guide expansion")
             verify(badge.y >= 0, "expanded guide top")
             state.guide = false
@@ -96,6 +106,12 @@ Item {
             var rows = texts(content, [])
             verify(rows.indexOf("\u25CF  " + state.rows[1]) !== -1, "selected row marker: " + rows)
             verify(rows.indexOf("     " + state.rows[0]) !== -1, "unselected row: " + rows)
+            state.mode = "media"
+            rows = texts(content, [])
+            verify(rows.indexOf("\u2611  " + state.rows[1]) !== -1, "checked media: " + rows)
+            verify(rows.indexOf("\u2610  " + state.rows[0]) !== -1, "unchecked media: " + rows)
+            state.layer = "shifted"
+            tryVerify(function() { return guideText.text.indexOf("Shifted") !== -1 })
             state.menu = false
             tryCompare(overlay, "visible", false)
             state.browsing = false

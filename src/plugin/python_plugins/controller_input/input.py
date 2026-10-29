@@ -10,11 +10,16 @@ DPAD_LEFT = 0x0004
 DPAD_RIGHT = 0x0008
 MENU = 0x0010
 VIEW = 0x0020
+LB = 0x0100
 RB = 0x0200
 A = 0x1000
 B = 0x2000
 X = 0x4000
 Y = 0x8000
+LT = 0x10000
+RT = 0x20000
+TRIGGER_PRESS = 30
+TRIGGER_RELEASE = 20
 
 
 class Gamepad(ctypes.Structure):
@@ -47,13 +52,16 @@ class XInputReader:
             return State()
         if result:
             raise ctypes.WinError(result)
-        return State(True, state.gamepad.buttons & 0xF3FF)
+        return State(True, state.gamepad.buttons & 0xF3FF,
+                     state.gamepad.left_trigger, state.gamepad.right_trigger)
 
 
 @dataclass(frozen=True)
 class State:
     connected: bool = False
     buttons: int = 0
+    left_trigger: int = 0
+    right_trigger: int = 0
 
 
 @dataclass(frozen=True)
@@ -85,6 +93,7 @@ class Edges:
         self.generation = 0
         self.sample_sequence = 0
         self.event_sequence = 0
+        self.buttons = 0
 
     def accept(self, sample):
         state = sample.state
@@ -96,12 +105,20 @@ class Edges:
             return None
 
         self.sample_sequence = sample.sequence
+        buttons = state.buttons
+        if state.connected:
+            for bit, value in ((LT, state.left_trigger), (RT, state.right_trigger)):
+                held = self.buttons & bit if self.state.connected else 0
+                if value >= TRIGGER_PRESS or (held and value >= TRIGGER_RELEASE):
+                    buttons |= bit
+        else:
+            buttons = 0
         events = []
 
         def emit(edge, button=0):
             self.event_sequence += 1
             events.append(Event(
-                sample.generation, self.event_sequence, edge, button, state.buttons))
+                sample.generation, self.event_sequence, edge, button, buttons))
 
         if state.connected and sample.generation > self.generation:
             self.generation = sample.generation
@@ -109,10 +126,10 @@ class Edges:
         elif self.state.connected and not state.connected:
             emit(Edge.DISCONNECTED)
         elif self.state.connected and state.connected:
-            changed = self.state.buttons ^ state.buttons
-            for bit in range(16):
-                button = 1 << bit
+            changed = self.buttons ^ buttons
+            for button in (LT, RT, *(1 << bit for bit in range(16))):
                 if changed & button:
-                    emit(Edge.DOWN if state.buttons & button else Edge.UP, button)
+                    emit(Edge.DOWN if buttons & button else Edge.UP, button)
         self.state = state
+        self.buttons = buttons
         return events
